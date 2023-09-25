@@ -149,13 +149,14 @@ impl Stats {
 
 fn main() {
     let size = Point(40, 40);
+    let game = State::new(size);
+
     let mut inputs = termion::async_stdin().keys();
     let mut screen = Screen::new(Point(2 * size.0, size.1));
     screen.enter_alt_screen().unwrap();
     screen.write_status_message("<calculating FPS...>").unwrap();
     screen.output.flush().unwrap();
 
-    let game = State::new(size);
     let stats = Stats::default();
     let mut time = game_loop::Time::now();
 

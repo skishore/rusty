@@ -4,7 +4,7 @@ use lazy_static::lazy_static;
 use rand::random;
 
 use crate::assert_eq_size;
-use crate::base::{HashMap, Glyph, Matrix, Point};
+use crate::base::{FOV, Glyph, HashMap, Matrix, Point};
 
 // Tile
 
@@ -37,6 +37,7 @@ lazy_static! {
 // Board
 
 struct Board {
+    fov: FOV,
     map: Matrix<&'static Tile>,
 }
 
@@ -107,14 +108,18 @@ impl Board {
 
 // State
 
+const FOV_RADIUS: i32 = 15;
+const VISION_RADIUS: i32 = 3;
+
 pub struct State {
     board: Board,
 }
 
 impl State {
     pub fn new(size: Point) -> Self {
+        let fov = FOV::new(FOV_RADIUS);
         let tile = TILES.get(&'.').unwrap();
-        let mut board = Board { map: Matrix::new(size, tile) };
+        let mut board = Board { fov, map: Matrix::new(size, tile) };
         let start = Point(size.0 / 2, size.1 / 2);
 
         loop {
@@ -128,11 +133,48 @@ impl State {
     pub fn update(&mut self) {}
 
     pub fn render(&self, buffer: &mut Matrix<Glyph>) {
+        let size = self.board.map.size;
+        let pos = Point(size.0 / 2, size.1 / 2);
+        let vision = self.compute_vision(pos);
+        let unseen = Glyph::wide(' ');
+
         for y in 0..buffer.size.1 {
             for x in 0..(buffer.size.0 / 2) {
                 let glyph = self.board.map.get(Point(x, y)).glyph;
-                buffer.set(Point(2 * x, y), glyph);
+                let sight = vision.get(Point(x - pos.0 + FOV_RADIUS, y - pos.1 + FOV_RADIUS));
+                buffer.set(Point(2 * x, y), if sight < 0 { unseen } else { glyph });
             }
         }
+    }
+
+    pub fn compute_vision(&self, pos: Point) -> Matrix<i32> {
+        let side = 2 * FOV_RADIUS + 1;
+        let mut vision = Matrix::new(Point(side, side), -1);
+
+        let blocked = |p: Point, prev: Option<&Point>| {
+            let q = Point(p.0 + pos.0, p.1 + pos.1);
+            let visibility = (|| {
+                // These constant values come from Point.distanceNethack.
+                // They are chosen such that, in a field of tall grass, we'll
+                // only see cells at a distanceNethack <= kVisionRadius.
+                if prev.is_none() { return 100 * (VISION_RADIUS + 1) - 95 - 46 - 25; };
+
+                let tile = self.board.map.get(q);
+                if tile.flags & FLAG_BLOCKED != 0 { return 0; }
+
+                let parent = prev.unwrap();
+                let obscure = tile.flags & FLAG_OBSCURE != 0;
+                let diagonal = p.0 != parent.0 && p.1 != parent.1;
+                let loss = if obscure { 95 + if diagonal { 46 } else { 0 } } else { 0 };
+                let prev = vision.get(Point(parent.0 + FOV_RADIUS, parent.1 + FOV_RADIUS));
+                max(prev - loss, 0)
+            })();
+
+            let key = Point(p.0 + FOV_RADIUS, p.1 + FOV_RADIUS);
+            vision.set(key, visibility);
+            visibility <= 0
+        };
+        self.board.fov.apply(blocked);
+        vision
     }
 }
