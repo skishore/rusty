@@ -1,10 +1,19 @@
 use std::cmp::{max, min};
+use std::rc::Rc;
 
 use lazy_static::lazy_static;
 use rand::random;
 
 use crate::assert_eq_size;
 use crate::base::{FOV, Glyph, HashMap, Matrix, Point};
+use crate::cell::{Cell, Token};
+
+// Constants
+
+const FOV_RADIUS: i32 = 15;
+const VISION_RADIUS: i32 = 3;
+
+pub enum Input { Escape, Char(char) }
 
 // Tile
 
@@ -34,108 +43,194 @@ lazy_static! {
     };
 }
 
+// Entity
+
+struct Entity {
+    glyph: Glyph,
+    pos: Point,
+}
+
+type EntRef = Rc<Cell<Entity>>;
+type EntTok = Token<Entity>;
+
 // Board
+
+enum Status { Free, Blocked, Occupied }
 
 struct Board {
     fov: FOV,
     map: Matrix<&'static Tile>,
+    entity_index: usize,
+    entity_at_pos: HashMap<Point, EntRef>,
+    entities: Vec<EntRef>,
 }
 
 impl Board {
-    fn init(&mut self) {
-        self.map.fill(self.map.default);
-        let d100 = || random::<i32>().rem_euclid(100);
-        let size = self.map.size;
+    fn new(size: Point) -> Self {
+        Self {
+            fov: FOV::new(FOV_RADIUS),
+            map: Matrix::new(size, TILES.get(&'.').unwrap()),
+            entity_index: 0,
+            entity_at_pos: HashMap::new(),
+            entities: vec![],
+        }
+    }
 
-        let automata = || -> Matrix<bool> {
-            let mut result = Matrix::new(size, false);
-            for x in 0..size.0 {
-                result.set(Point(x, 0), true);
-                result.set(Point(x, size.1 - 1), true);
-            }
-            for y in 0..size.1 {
-                result.set(Point(0, y), true);
-                result.set(Point(size.0 - 1, y), true);
-            }
+    fn get_status(&self, point: Point) -> Status {
+        if self.entity_at_pos.contains_key(&point) { return Status::Occupied; }
+        let blocked = self.map.get(point).flags & FLAG_BLOCKED != 0;
+        if blocked { Status::Blocked } else { Status::Free }
+    }
 
-            for y in 0..size.1 {
-                for x in 0..size.0 {
-                    if d100() < 45 { result.set(Point(x, y),  true); }
-                }
-            }
+    fn add_entity(&mut self, e: EntRef, et: &EntTok) {
+        self.entities.push(e.clone());
+        let collider = self.entity_at_pos.insert(e.get(et).pos, e);
+        assert!(collider.is_none());
+    }
 
-            for i in 0..3 {
-                let mut next = result.clone();
-                for y in 1..size.1 - 1 {
-                    for x in 1..size.0 - 1 {
-                        let point = Point(x, y);
-                        let (mut adj1, mut adj2) = (0, 0);
-                        for dy in -2_i32..=2 {
-                            for dx in -2_i32..=2 {
-                                if dx == 0 && dy == 0 { continue; };
-                                if min(dx.abs(), dy.abs()) == 2 { continue; };
-                                let next = point + Point(dx, dy);
-                                if !result.get(next) { continue; }
-                                let distance = max(dx.abs(), dy.abs());
-                                if distance <= 1 { adj1 += 1; }
-                                if distance <= 2 { adj2 += 1; }
-                            }
-                        }
-                        let blocked = adj1 >= 5 || (i < 2 && adj2 <= 1);
-                        next.set(point, blocked);
-                    }
-                }
-                std::mem::swap(&mut result, &mut next);
-            }
-            result
-        };
+    fn move_entity(&mut self, e: &EntRef, et: &mut EntTok, to: Point) {
+        let existing = self.entity_at_pos.remove(&e.get(et).pos).unwrap();
+        assert!(Rc::ptr_eq(&existing, &e));
+        let collider = self.entity_at_pos.insert(to, existing);
+        assert!(collider.is_none());
+        e.get_mut(et).pos = to;
+    }
 
-        let walls = automata();
-        let grass = automata();
-        let wt = TILES.get(&'#').unwrap();
-        let gt = TILES.get(&'"').unwrap();
+    fn remove_entity(&mut self, e: &EntRef, et: &EntTok) {
+        let existing = self.entity_at_pos.remove(&e.get(et).pos).unwrap();
+        assert!(Rc::ptr_eq(&existing, &e));
+        let index = self.entities.iter().position(|x| Rc::ptr_eq(x, &e)).unwrap();
+        if self.entity_index > index { self.entity_index -= 1; };
+        self.entities.remove(index);
+    }
+}
+
+// Game logic
+
+fn mapgen(map: &mut Matrix<&'static Tile>) {
+    map.fill(map.default);
+    let d100 = || random::<i32>().rem_euclid(100);
+    let size = map.size;
+
+    let automata = || -> Matrix<bool> {
+        let mut result = Matrix::new(size, false);
+        for x in 0..size.0 {
+            result.set(Point(x, 0), true);
+            result.set(Point(x, size.1 - 1), true);
+        }
+        for y in 0..size.1 {
+            result.set(Point(0, y), true);
+            result.set(Point(size.0 - 1, y), true);
+        }
+
         for y in 0..size.1 {
             for x in 0..size.0 {
-                let point = Point(x, y);
-                if walls.get(point) {
-                    self.map.set(point, wt);
-                } else if grass.get(point) {
-                    self.map.set(point, gt);
-                }
+                if d100() < 45 { result.set(Point(x, y),  true); }
             }
         }
+
+        for i in 0..3 {
+            let mut next = result.clone();
+            for y in 1..size.1 - 1 {
+                for x in 1..size.0 - 1 {
+                    let point = Point(x, y);
+                    let (mut adj1, mut adj2) = (0, 0);
+                    for dy in -2_i32..=2 {
+                        for dx in -2_i32..=2 {
+                            if dx == 0 && dy == 0 { continue; };
+                            if min(dx.abs(), dy.abs()) == 2 { continue; };
+                            let next = point + Point(dx, dy);
+                            if !result.get(next) { continue; }
+                            let distance = max(dx.abs(), dy.abs());
+                            if distance <= 1 { adj1 += 1; }
+                            if distance <= 2 { adj2 += 1; }
+                        }
+                    }
+                    let blocked = adj1 >= 5 || (i < 2 && adj2 <= 1);
+                    next.set(point, blocked);
+                }
+            }
+            std::mem::swap(&mut result, &mut next);
+        }
+        result
+    };
+
+    let walls = automata();
+    let grass = automata();
+    let wt = TILES.get(&'#').unwrap();
+    let gt = TILES.get(&'"').unwrap();
+    for y in 0..size.1 {
+        for x in 0..size.0 {
+            let point = Point(x, y);
+            if walls.get(point) {
+                map.set(point, wt);
+            } else if grass.get(point) {
+                map.set(point, gt);
+            }
+        }
+    }
+}
+
+fn process_input(state: &mut State, input: Input) {
+    let dir = match input {
+        Input::Char('h') => Some(Point(-1,  0)),
+        Input::Char('j') => Some(Point( 0,  1)),
+        Input::Char('k') => Some(Point( 0, -1)),
+        Input::Char('l') => Some(Point( 1,  0)),
+        Input::Char('y') => Some(Point(-1, -1)),
+        Input::Char('u') => Some(Point( 1, -1)),
+        Input::Char('b') => Some(Point(-1,  1)),
+        Input::Char('n') => Some(Point( 1,  1)),
+        _ => None,
+    };
+
+    if dir.is_none() { return; }
+    let source = state.player.get(&state.et).pos;
+    let target = source + dir.unwrap();
+    if let Status::Free = state.board.get_status(target) {
+        state.board.move_entity(&state.player, &mut state.et, target);
+    }
+}
+
+fn update_state(state: &mut State) {
+    while !state.inputs.is_empty() {
+        let input = state.inputs.remove(0);
+        process_input(state, input);
     }
 }
 
 // State
 
-const FOV_RADIUS: i32 = 15;
-const VISION_RADIUS: i32 = 3;
-
 pub struct State {
     board: Board,
+    inputs: Vec<Input>,
+    player: EntRef,
+    et: EntTok,
 }
 
 impl State {
     pub fn new(size: Point) -> Self {
-        let fov = FOV::new(FOV_RADIUS);
-        let tile = TILES.get(&'.').unwrap();
-        let mut board = Board { fov, map: Matrix::new(size, tile) };
-        let start = Point(size.0 / 2, size.1 / 2);
+        let mut board = Board::new(size);
+        let pos = Point(size.0 / 2, size.1 / 2);
 
         loop {
-            board.init();
-            if board.map.get(start).flags & FLAG_BLOCKED == 0 { break; }
+            mapgen(&mut board.map);
+            if board.map.get(pos).flags & FLAG_BLOCKED == 0 { break; }
         }
 
-        Self { board }
+        let et = unsafe { Token::<Entity>::new() };
+        let glyph = Glyph::wide('@');
+        let player = EntRef::new(Cell::new(Entity { glyph, pos }));
+        board.add_entity(player.clone(), &et);
+        Self { board, inputs: vec![], player, et }
     }
 
-    pub fn update(&mut self) {}
+    pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
+
+    pub fn update(&mut self) { update_state(self); }
 
     pub fn render(&self, buffer: &mut Matrix<Glyph>) {
-        let size = self.board.map.size;
-        let pos = Point(size.0 / 2, size.1 / 2);
+        let pos = self.player.get(&self.et).pos;
         let offset = Point(FOV_RADIUS, FOV_RADIUS);
         let vision = self.compute_vision(pos);
         let unseen = Glyph::wide(' ');
@@ -147,6 +242,12 @@ impl State {
                 let sight = vision.get(point - pos + offset);
                 buffer.set(Point(2 * x, y), if sight < 0 { unseen } else { glyph });
             }
+        }
+
+        for entity in &self.board.entities {
+            let Point(x, y) = entity.get(&self.et).pos;
+            let seen = buffer.get(Point(2 * x, y)) != unseen;
+            if seen { buffer.set(Point(2 * x, y), entity.get(&self.et).glyph) };
         }
     }
 

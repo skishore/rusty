@@ -1,9 +1,10 @@
 use std::cell::UnsafeCell;
+use std::marker::PhantomData;
 
-pub struct Token { _x: () }
+pub struct Token<T: ?Sized> { _x: PhantomData<T> }
 
-impl Token {
-    pub unsafe fn new() -> Self { Self { _x: () } }
+impl<T> Token<T> {
+    pub unsafe fn new() -> Self { Self { _x: PhantomData {} } }
 }
 
 pub struct Cell<T: ?Sized> {
@@ -16,12 +17,12 @@ impl<T> Cell<T> {
     }
 
     #[inline(always)]
-    pub fn get<'a>(&self, _: &'a Token) -> &'a T {
+    pub fn get<'a>(&self, _: &'a Token<T>) -> &'a T {
         return unsafe { &*self.value.get() }
     }
 
     #[inline(always)]
-    pub fn get_mut<'a>(&self, _: &'a mut Token) -> &'a mut T {
+    pub fn get_mut<'a>(&self, _: &'a mut Token<T>) -> &'a mut T {
         return unsafe { &mut *self.value.get() }
     }
 }

@@ -13,7 +13,7 @@ use termion::raw::IntoRawMode;
 use termion::screen::{ToAlternateScreen, ToMainScreen};
 
 use crate::base::{Char, Color, Glyph, Matrix, Point};
-use crate::game::State;
+use crate::game::{Input, State};
 
 struct Screen {
     extent: Point,
@@ -147,6 +147,14 @@ impl Stats {
     }
 }
 
+fn input(key: Key) -> Option<Input> {
+    match key {
+        Key::Char(ch) => Some(Input::Char(ch)),
+        Key::End => Some(Input::Escape),
+        _ => None,
+    }
+}
+
 fn main() {
     let size = Point(40, 40);
     let game = State::new(size);
@@ -163,8 +171,10 @@ fn main() {
     game_loop(game, 60, 0.01, |g| {
         let start = game_loop::Time::now();
         if let Some(Ok(key)) = inputs.next() {
-            if key == Key::Char('q') || key == Key::Ctrl('c') {
+            if key == Key::Ctrl('c') {
                 g.exit();
+            } else if let Some(input) = input(key) {
+                g.game.add_input(input);
             }
         }
         g.game.update();
