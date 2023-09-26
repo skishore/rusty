@@ -62,6 +62,20 @@ impl Point {
     pub fn len_l2_squared(&self) -> i32 { self.0 * self.0 + self.1 * self.1 }
 }
 
+impl std::ops::Add for Point {
+    type Output = Point;
+    fn add(self, other: Point) -> Point {
+        Point(self.0 + other.0, self.1 + other.1)
+    }
+}
+
+impl std::ops::Sub for Point {
+    type Output = Point;
+    fn sub(self, other: Point) -> Point {
+        Point(self.0 - other.0, self.1 - other.1)
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Matrix<T> {
     pub data: Vec<T>,

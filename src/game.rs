@@ -68,12 +68,13 @@ impl Board {
                 let mut next = result.clone();
                 for y in 1..size.1 - 1 {
                     for x in 1..size.0 - 1 {
+                        let point = Point(x, y);
                         let (mut adj1, mut adj2) = (0, 0);
                         for dy in -2_i32..=2 {
                             for dx in -2_i32..=2 {
                                 if dx == 0 && dy == 0 { continue; };
                                 if min(dx.abs(), dy.abs()) == 2 { continue; };
-                                let next = Point(x + dx, y + dy);
+                                let next = point + Point(dx, dy);
                                 if !result.get(next) { continue; }
                                 let distance = max(dx.abs(), dy.abs());
                                 if distance <= 1 { adj1 += 1; }
@@ -81,7 +82,7 @@ impl Board {
                             }
                         }
                         let blocked = adj1 >= 5 || (i < 2 && adj2 <= 1);
-                        next.set(Point(x, y), blocked);
+                        next.set(point, blocked);
                     }
                 }
                 std::mem::swap(&mut result, &mut next);
@@ -135,13 +136,15 @@ impl State {
     pub fn render(&self, buffer: &mut Matrix<Glyph>) {
         let size = self.board.map.size;
         let pos = Point(size.0 / 2, size.1 / 2);
+        let offset = Point(FOV_RADIUS, FOV_RADIUS);
         let vision = self.compute_vision(pos);
         let unseen = Glyph::wide(' ');
 
         for y in 0..buffer.size.1 {
             for x in 0..(buffer.size.0 / 2) {
-                let glyph = self.board.map.get(Point(x, y)).glyph;
-                let sight = vision.get(Point(x - pos.0 + FOV_RADIUS, y - pos.1 + FOV_RADIUS));
+                let point = Point(x, y);
+                let glyph = self.board.map.get(point).glyph;
+                let sight = vision.get(point - pos + offset);
                 buffer.set(Point(2 * x, y), if sight < 0 { unseen } else { glyph });
             }
         }
@@ -149,29 +152,28 @@ impl State {
 
     pub fn compute_vision(&self, pos: Point) -> Matrix<i32> {
         let side = 2 * FOV_RADIUS + 1;
+        let offset = Point(FOV_RADIUS, FOV_RADIUS);
         let mut vision = Matrix::new(Point(side, side), -1);
 
         let blocked = |p: Point, prev: Option<&Point>| {
-            let q = Point(p.0 + pos.0, p.1 + pos.1);
             let visibility = (|| {
                 // These constant values come from Point.distanceNethack.
                 // They are chosen such that, in a field of tall grass, we'll
                 // only see cells at a distanceNethack <= kVisionRadius.
                 if prev.is_none() { return 100 * (VISION_RADIUS + 1) - 95 - 46 - 25; };
 
-                let tile = self.board.map.get(q);
+                let tile = self.board.map.get(p + pos);
                 if tile.flags & FLAG_BLOCKED != 0 { return 0; }
 
                 let parent = prev.unwrap();
                 let obscure = tile.flags & FLAG_OBSCURE != 0;
                 let diagonal = p.0 != parent.0 && p.1 != parent.1;
                 let loss = if obscure { 95 + if diagonal { 46 } else { 0 } } else { 0 };
-                let prev = vision.get(Point(parent.0 + FOV_RADIUS, parent.1 + FOV_RADIUS));
+                let prev = vision.get(*parent + offset);
                 max(prev - loss, 0)
             })();
 
-            let key = Point(p.0 + FOV_RADIUS, p.1 + FOV_RADIUS);
-            vision.set(key, visibility);
+            vision.set(p + offset, visibility);
             visibility <= 0
         };
         self.board.fov.apply(blocked);
