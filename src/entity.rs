@@ -4,10 +4,13 @@ use std::rc::Rc;
 use crate::base::{Glyph, Point};
 use crate::cell::{Cell, Token};
 
+//////////////////////////////////////////////////////////////////////////////
+
 // Actual data definitions:
 
 #[derive(Debug)]
 pub struct EntityBase {
+    pub player: bool,
     pub removed: bool,
     pub glyph: Glyph,
     pub pos: Point,
@@ -15,7 +18,7 @@ pub struct EntityBase {
 
 #[derive(Debug)]
 pub struct Entity {
-    pub base: EntityBase,
+    base: EntityBase,
     data: EntityData
 }
 
@@ -31,10 +34,9 @@ pub struct PokemonData {
 }
 
 #[derive(Debug)]
-pub struct TrainerData {
-    pub name: String,
-    pub player: bool,
-}
+pub struct TrainerData {}
+
+//////////////////////////////////////////////////////////////////////////////
 
 // Boilerplate follows...
 
@@ -48,6 +50,10 @@ impl EntityRef {
 
     pub fn base_mut<'a>(&'a self, t: &'a mut Token<Entity>) -> &'a mut EntityBase {
         &mut self.0.get_mut(t).base
+    }
+
+    pub fn same(&self, other: &EntityRef) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
     }
 
     pub fn test(self, t: &Token<Entity>) -> MatchRef {
@@ -94,6 +100,12 @@ impl Deref for TrainerRef {
 }
 
 impl TrainerRef {
+    pub fn new(pos: Point, player: bool) -> TrainerRef {
+        let base = EntityBase { player, removed: false, glyph: Glyph::wide('@'), pos };
+        let entity = Entity { base, data: EntityData::Trainer(TrainerData {}) };
+        TrainerRef(EntityRef(Rc::new(Cell::new(entity))))
+    }
+
     pub fn data<'a>(&'a self, t: &'a Token<Entity>) -> &'a TrainerData {
         let data = &self.0.0.get(t).data;
         if let EntityData::Trainer(x) = data { return &x; }
