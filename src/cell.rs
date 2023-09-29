@@ -1,11 +1,14 @@
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 
+use crate::assert_eq_size;
+
 pub struct Token<T: ?Sized> { _x: PhantomData<T> }
 
 impl<T> Token<T> {
     pub unsafe fn new() -> Self { Self { _x: PhantomData {} } }
 }
+assert_eq_size!(Token<i32>, 0);
 
 pub struct Cell<T: ?Sized> {
     value: UnsafeCell<T>,

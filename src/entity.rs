@@ -2,30 +2,18 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::base::{Glyph, Point};
-use crate::cell::{Cell, Token};
+use crate::cell::{self, Cell};
 
 //////////////////////////////////////////////////////////////////////////////
 
 // Actual data definitions:
 
 #[derive(Debug)]
-pub struct EntityBase {
+pub struct EntityData {
     pub player: bool,
     pub removed: bool,
     pub glyph: Glyph,
     pub pos: Point,
-}
-
-#[derive(Debug)]
-pub struct Entity {
-    base: EntityBase,
-    data: EntityData
-}
-
-#[derive(Debug)]
-enum EntityData {
-    Pokemon(PokemonData),
-    Trainer(TrainerData),
 }
 
 #[derive(Debug)]
@@ -36,85 +24,103 @@ pub struct PokemonData {
 #[derive(Debug)]
 pub struct TrainerData {}
 
+fn trainer(pos: Point, player: bool) -> EntityRepr {
+    let glyph = Glyph::wide('@');
+    let base = EntityData { player, removed: false, glyph, pos };
+    EntityRepr { base, data: EntityType::Trainer(TrainerData {}) }
+}
+
 //////////////////////////////////////////////////////////////////////////////
 
 // Boilerplate follows...
 
-#[derive(Clone)]
-pub struct EntityRef(Rc<Cell<Entity>>);
+#[derive(Debug)]
+pub struct EntityRepr {
+    base: EntityData,
+    data: EntityType,
+}
 
-impl EntityRef {
-    pub fn base<'a>(&'a self, t: &'a Token<Entity>) -> &'a EntityBase {
+#[derive(Debug)]
+enum EntityType {
+    Pokemon(PokemonData),
+    Trainer(TrainerData),
+}
+
+pub enum ET {
+    Pokemon(Pokemon),
+    Trainer(Trainer),
+}
+
+pub type Token = cell::Token<EntityRepr>;
+
+#[derive(Clone)]
+pub struct Entity(Rc<Cell<EntityRepr>>);
+
+impl Entity {
+    pub fn base<'a>(&'a self, t: &'a Token) -> &'a EntityData {
         &self.0.get(t).base
     }
 
-    pub fn base_mut<'a>(&'a self, t: &'a mut Token<Entity>) -> &'a mut EntityBase {
+    pub fn base_mut<'a>(&'a self, t: &'a mut Token) -> &'a mut EntityData {
         &mut self.0.get_mut(t).base
     }
 
-    pub fn same(&self, other: &EntityRef) -> bool {
+    pub fn same(&self, other: &Entity) -> bool {
         Rc::ptr_eq(&self.0, &other.0)
     }
 
-    pub fn test(self, t: &Token<Entity>) -> MatchRef {
+    pub fn test(self, t: &Token) -> ET {
         match &self.0.get(t).data {
-            EntityData::Pokemon(_) => MatchRef::Pokemon(PokemonRef(self)),
-            EntityData::Trainer(_) => MatchRef::Trainer(TrainerRef(self)),
+            EntityType::Pokemon(_) => ET::Pokemon(Pokemon(self)),
+            EntityType::Trainer(_) => ET::Trainer(Trainer(self)),
         }
     }
 }
 
-pub enum MatchRef {
-    Pokemon(PokemonRef),
-    Trainer(TrainerRef),
-}
-
 #[derive(Clone)]
-pub struct PokemonRef(EntityRef);
+pub struct Pokemon(Entity);
 
-impl Deref for PokemonRef {
-    type Target = EntityRef;
+impl Deref for Pokemon {
+    type Target = Entity;
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
-impl PokemonRef {
-    pub fn data<'a>(&'a self, t: &'a Token<Entity>) -> &'a PokemonData {
+impl Pokemon {
+    pub fn data<'a>(&'a self, t: &'a Token) -> &'a PokemonData {
         let data = &self.0.0.get(t).data;
-        if let EntityData::Pokemon(x) = data { return &x; }
-        panic!("PokemonRef contained a Trainer: {:?}", data);
+        if let EntityType::Pokemon(x) = data { return &x; }
+        panic!("Pokemon referenced a Trainer: {:?}", data);
     }
 
-    pub fn data_mut<'a>(&'a self, t: &'a mut Token<Entity>) -> &'a mut PokemonData {
+    pub fn data_mut<'a>(&'a self, t: &'a mut Token) -> &'a mut PokemonData {
         let data = &mut self.0.0.get_mut(t).data;
-        if let EntityData::Pokemon(ref mut x) = data { return x; }
-        panic!("PokemonRef contained a Trainer: {:?}", data);
+        if let EntityType::Pokemon(ref mut x) = data { return x; }
+        panic!("Pokemon referenced a Trainer: {:?}", data);
     }
 }
 
 #[derive(Clone)]
-pub struct TrainerRef(EntityRef);
+pub struct Trainer(Entity);
 
-impl Deref for TrainerRef {
-    type Target = EntityRef;
+impl Deref for Trainer {
+    type Target = Entity;
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
-impl TrainerRef {
-    pub fn new(pos: Point, player: bool) -> TrainerRef {
-        let base = EntityBase { player, removed: false, glyph: Glyph::wide('@'), pos };
-        let entity = Entity { base, data: EntityData::Trainer(TrainerData {}) };
-        TrainerRef(EntityRef(Rc::new(Cell::new(entity))))
+impl Trainer {
+    pub fn new(pos: Point, player: bool) -> Trainer {
+        Trainer(Entity(Rc::new(Cell::new(trainer(pos, player)))))
     }
 
-    pub fn data<'a>(&'a self, t: &'a Token<Entity>) -> &'a TrainerData {
+    pub fn data<'a>(&'a self, t: &'a Token) -> &'a TrainerData {
         let data = &self.0.0.get(t).data;
-        if let EntityData::Trainer(x) = data { return &x; }
-        panic!("TrainerRef contained a Pokemon: {:?}", data);
+        if let EntityType::Trainer(x) = data { return &x; }
+        panic!("Trainer referenced a Pokemon: {:?}", data);
     }
 
-    pub fn data_mut<'a>(&'a self, t: &'a mut Token<Entity>) -> &'a mut TrainerData {
+    pub fn data_mut<'a>(&'a self, t: &'a mut Token) -> &'a mut TrainerData {
         let data = &mut self.0.0.get_mut(t).data;
-        if let EntityData::Trainer(ref mut x) = data { return x; }
-        panic!("TrainerRef contained a Pokemon: {:?}", data);
+        if let EntityType::Trainer(ref mut x) = data { return x; }
+        panic!("Trainer referenced a Pokemon: {:?}", data);
     }
 }

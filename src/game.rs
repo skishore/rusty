@@ -5,8 +5,7 @@ use rand::random;
 
 use crate::assert_eq_size;
 use crate::base::{FOV, Glyph, HashMap, Matrix, Point};
-use crate::cell::Token;
-use crate::entity::{Entity, EntityRef, TrainerRef};
+use crate::entity::{Entity, Token, Trainer};
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -16,9 +15,6 @@ const FOV_RADIUS: i32 = 15;
 const VISION_RADIUS: i32 = 3;
 
 pub enum Input { Escape, Char(char) }
-
-type EntRef = EntityRef;
-type EntTok = Token<Entity>;
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -60,8 +56,8 @@ struct Board {
     fov: FOV,
     map: Matrix<&'static Tile>,
     entity_index: usize,
-    entity_at_pos: HashMap<Point, EntRef>,
-    entities: Vec<EntRef>,
+    entity_at_pos: HashMap<Point, Entity>,
+    entities: Vec<Entity>,
 }
 
 impl Board {
@@ -77,7 +73,7 @@ impl Board {
 
     // Reads
 
-    fn get_active_entity(&self) -> &EntRef {
+    fn get_active_entity(&self) -> &Entity {
         &self.entities[self.entity_index]
     }
 
@@ -89,9 +85,9 @@ impl Board {
 
     // Writes
 
-    fn add_entity(&mut self, e: &EntRef, et: &EntTok) {
+    fn add_entity(&mut self, e: &Entity, t: &Token) {
         self.entities.push(e.clone());
-        let collider = self.entity_at_pos.insert(e.base(et).pos, e.clone());
+        let collider = self.entity_at_pos.insert(e.base(t).pos, e.clone());
         assert!(collider.is_none());
     }
 
@@ -102,17 +98,17 @@ impl Board {
         }
     }
 
-    fn move_entity(&mut self, e: &EntRef, et: &mut EntTok, to: Point) {
-        let existing = self.entity_at_pos.remove(&e.base(et).pos).unwrap();
+    fn move_entity(&mut self, e: &Entity, t: &mut Token, to: Point) {
+        let existing = self.entity_at_pos.remove(&e.base(t).pos).unwrap();
         assert!(existing.same(&e));
         let collider = self.entity_at_pos.insert(to, existing);
         assert!(collider.is_none());
-        e.base_mut(et).pos = to;
+        e.base_mut(t).pos = to;
     }
 
-    fn remove_entity(&mut self, e: &EntRef, et: &mut EntTok) {
+    fn remove_entity(&mut self, e: &Entity, t: &mut Token) {
         // The player is just tagged "removed", so we always have an entity.
-        let entity = e.base_mut(et);
+        let entity = e.base_mut(t);
         entity.removed = true;
         if entity.player { return; }
 
@@ -211,10 +207,10 @@ fn process_input(state: &mut State, input: Input) {
     };
 
     if dir.is_none() { return; }
-    let source = state.player.base(&state.et).pos;
+    let source = state.player.base(&state.t).pos;
     let target = source + dir.unwrap();
     if let Status::Free = state.board.get_status(target) {
-        state.board.move_entity(&state.player, &mut state.et, target);
+        state.board.move_entity(&state.player, &mut state.t, target);
     }
 }
 
@@ -223,7 +219,7 @@ fn update_state(state: &mut State) {
         let active = state.board.get_active_entity();
         if !active.same(&state.player) { return false; }
 
-        let player = state.player.base(&state.et);
+        let player = state.player.base(&state.t);
         !player.removed
     };
 
@@ -240,8 +236,8 @@ fn update_state(state: &mut State) {
 pub struct State {
     board: Board,
     inputs: Vec<Input>,
-    player: TrainerRef,
-    et: EntTok,
+    player: Trainer,
+    t: Token,
 }
 
 impl State {
@@ -254,10 +250,10 @@ impl State {
             if board.map.get(pos).flags & FLAG_BLOCKED == 0 { break; }
         }
 
-        let et = unsafe { Token::<Entity>::new() };
-        let player = TrainerRef::new(pos, true);
-        board.add_entity(&player, &et);
-        Self { board, inputs: vec![], player, et }
+        let t = unsafe { Token::new() };
+        let player = Trainer::new(pos, true);
+        board.add_entity(&player, &t);
+        Self { board, inputs: vec![], player, t }
     }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
@@ -265,7 +261,7 @@ impl State {
     pub fn update(&mut self) { update_state(self); }
 
     pub fn render(&self, buffer: &mut Matrix<Glyph>) {
-        let pos = self.player.base(&self.et).pos;
+        let pos = self.player.base(&self.t).pos;
         let offset = Point(FOV_RADIUS, FOV_RADIUS);
         let vision = self.compute_vision(pos);
         let unseen = Glyph::wide(' ');
@@ -280,9 +276,9 @@ impl State {
         }
 
         for entity in &self.board.entities {
-            let Point(x, y) = entity.base(&self.et).pos;
+            let Point(x, y) = entity.base(&self.t).pos;
             let seen = buffer.get(Point(2 * x, y)) != unseen;
-            if seen { buffer.set(Point(2 * x, y), entity.base(&self.et).glyph) }
+            if seen { buffer.set(Point(2 * x, y), entity.base(&self.t).glyph) }
         }
     }
 
