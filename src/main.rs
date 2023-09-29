@@ -1,6 +1,7 @@
 mod base;
 mod cell;
 mod game;
+mod entity;
 
 use std::io::{self, Write};
 
