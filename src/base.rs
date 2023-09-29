@@ -197,8 +197,8 @@ impl FOV {
         while index < cache.len() {
             let node = &self.nodes[cache[index] as usize];
             let prev = if index > 0 { Some(&node.prev) } else { None };
-            if blocked(node.next, prev) { index += 1; continue; };
-            for x in &node.children { cache.push(*x); };
+            if blocked(node.next, prev) { index += 1; continue; }
+            for x in &node.children { cache.push(*x); }
             index += 1;
         }
     }
@@ -206,8 +206,8 @@ impl FOV {
     fn update(&mut self, node: usize, los: &Vec<Point>, i: usize) {
         let prev = los[i];
         assert!(self.nodes[node].next == prev);
-        if prev.len_l2() > (self.radius as f64) - 0.5 { return; };
-        if !(i + 1 < los.len()) { return; };
+        if prev.len_l2() > (self.radius as f64) - 0.5 { return; }
+        if !(i + 1 < los.len()) { return; }
 
         let next = los[i + 1];
         let child = (|| {
