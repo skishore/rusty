@@ -51,6 +51,11 @@ pub enum ET {
     Trainer(Trainer),
 }
 
+pub enum ETRef<'a> {
+    Pokemon(&'a Pokemon),
+    Trainer(&'a Trainer),
+}
+
 pub type Token = cell::Token<EntityRepr>;
 
 #[derive(Clone)]
@@ -75,9 +80,18 @@ impl Entity {
             EntityType::Trainer(_) => ET::Trainer(Trainer(self)),
         }
     }
+
+    pub fn test_ref<'a>(&'a self, t: &Token) -> ETRef<'a> {
+        let p = self as *const Entity;
+        match &self.0.get(t).data {
+            EntityType::Pokemon(_) => ETRef::Pokemon(unsafe { &*(p as *const Pokemon) }),
+            EntityType::Trainer(_) => ETRef::Trainer(unsafe { &*(p as *const Trainer) }),
+        }
+    }
 }
 
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct Pokemon(Entity);
 
 impl Deref for Pokemon {
@@ -89,17 +103,18 @@ impl Pokemon {
     pub fn data<'a>(&'a self, t: &'a Token) -> &'a PokemonData {
         let data = &self.0.0.get(t).data;
         if let EntityType::Pokemon(x) = data { return &x; }
-        panic!("Pokemon referenced a Trainer: {:?}", data);
+        unsafe { std::hint::unreachable_unchecked() }
     }
 
     pub fn data_mut<'a>(&'a self, t: &'a mut Token) -> &'a mut PokemonData {
         let data = &mut self.0.0.get_mut(t).data;
         if let EntityType::Pokemon(ref mut x) = data { return x; }
-        panic!("Pokemon referenced a Trainer: {:?}", data);
+        unsafe { std::hint::unreachable_unchecked() }
     }
 }
 
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct Trainer(Entity);
 
 impl Deref for Trainer {
@@ -115,12 +130,12 @@ impl Trainer {
     pub fn data<'a>(&'a self, t: &'a Token) -> &'a TrainerData {
         let data = &self.0.0.get(t).data;
         if let EntityType::Trainer(x) = data { return &x; }
-        panic!("Trainer referenced a Pokemon: {:?}", data);
+        unsafe { std::hint::unreachable_unchecked() }
     }
 
     pub fn data_mut<'a>(&'a self, t: &'a mut Token) -> &'a mut TrainerData {
         let data = &mut self.0.0.get_mut(t).data;
         if let EntityType::Trainer(ref mut x) = data { return x; }
-        panic!("Trainer referenced a Pokemon: {:?}", data);
+        unsafe { std::hint::unreachable_unchecked() }
     }
 }
