@@ -14,6 +14,9 @@ use crate::entity::{Entity, Token, Trainer};
 const FOV_RADIUS: i32 = 15;
 const VISION_RADIUS: i32 = 3;
 
+const MOVE_TIMER: i32 = 960;
+const TURN_TIMER: i32 = 120;
+
 pub enum Input { Escape, Char(char) }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -91,7 +94,8 @@ impl Board {
         assert!(collider.is_none());
     }
 
-    fn advance_entity(&mut self) {
+    fn advance_entity(&mut self, t: &mut Token) {
+        charge(self.get_active_entity(), t);
         self.entity_index += 1;
         if self.entity_index == self.entities.len() {
             self.entity_index = 0;
@@ -127,7 +131,9 @@ impl Board {
     }
 }
 
-// Game logic
+//////////////////////////////////////////////////////////////////////////////
+
+// Map generation
 
 fn mapgen(map: &mut Matrix<&'static Tile>) {
     map.fill(map.default);
@@ -193,6 +199,71 @@ fn mapgen(map: &mut Matrix<&'static Tile>) {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////////
+
+// Game logic
+
+pub struct MoveData { dir: Point }
+
+pub enum Action {
+    Idle,
+    Move(MoveData),
+    WaitForInput,
+}
+
+struct ActionResult {
+    success: bool,
+    moves: f64,
+    turns: f64,
+}
+
+impl ActionResult {
+    fn failure() -> Self { Self { success: false, moves: 0., turns: 1. } }
+    fn success() -> Self { Self { success: true,  moves: 0., turns: 1. } }
+}
+
+fn charge(e: &Entity, t: &mut Token) {
+    let entity = e.base_mut(t);
+    let charge = (TURN_TIMER as f64 * entity.speed).round() as i32;
+    if entity.move_timer > 0 { entity.move_timer -= charge; }
+    if entity.turn_timer > 0 { entity.turn_timer -= charge; }
+}
+
+fn move_ready(e: &Entity, t: &Token) -> bool { e.base(t).move_timer <= 0 }
+
+fn turn_ready(e: &Entity, t: &Token) -> bool { e.base(t).turn_timer <= 0 }
+
+fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
+    let entity = e.base_mut(t);
+    entity.move_timer += (MOVE_TIMER as f64 * result.moves).round() as i32;
+    entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
+}
+
+fn plan(board: &Board, e: &Entity, t: &Token, input: &mut Option<Action>) -> Action {
+    let entity = e.base(t);
+    if entity.player {
+        input.take().unwrap_or(Action::WaitForInput)
+    } else {
+        Action::Idle
+    }
+}
+
+fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
+    match action {
+        Action::Idle => ActionResult::success(),
+        Action::WaitForInput => ActionResult::failure(),
+        Action::Move(MoveData { dir }) => {
+            if dir == Point::default() { return ActionResult::success(); }
+            let target = e.base(&state.t).pos + dir;
+            if let Status::Free = state.board.get_status(target) {
+                state.board.move_entity(&state.player, &mut state.t, target);
+                return ActionResult::success();
+            }
+            ActionResult::failure()
+        }
+    }
+}
+
 fn process_input(state: &mut State, input: Input) {
     let dir = match input {
         Input::Char('h') => Some(Point(-1,  0)),
@@ -203,29 +274,40 @@ fn process_input(state: &mut State, input: Input) {
         Input::Char('u') => Some(Point( 1, -1)),
         Input::Char('b') => Some(Point(-1,  1)),
         Input::Char('n') => Some(Point( 1,  1)),
+        Input::Char('.') => Some(Point( 0,  0)),
         _ => None,
     };
-
-    if dir.is_none() { return; }
-    let source = state.player.base(&state.t).pos;
-    let target = source + dir.unwrap();
-    if let Status::Free = state.board.get_status(target) {
-        state.board.move_entity(&state.player, &mut state.t, target);
-    }
+    state.input = dir.map(|x| Action::Move(MoveData { dir: x }));
 }
 
 fn update_state(state: &mut State) {
+    let player_alive = |state: &State| {
+        !state.player.base(&state.t).removed
+    };
+
     let needs_input = |state: &State| {
+        if state.input.is_some() { return false; }
         let active = state.board.get_active_entity();
         if !active.same(&state.player) { return false; }
-
-        let player = state.player.base(&state.t);
-        !player.removed
+        player_alive(state)
     };
 
     while !state.inputs.is_empty() && needs_input(state) {
         let input = state.inputs.remove(0);
         process_input(state, input);
+    }
+
+    while player_alive(&state) {
+        let e = state.board.get_active_entity();
+        if !turn_ready(e, &state.t) {
+            state.board.advance_entity(&mut state.t);
+            continue;
+        }
+        let entity = e.clone();
+        let action = plan(&state.board, &entity, &state.t, &mut state.input);
+        let result = act(state, &entity, action);
+        if entity.base(&state.t).player && !result.success { break; }
+        wait(&entity, &mut state.t, &result);
     }
 }
 
@@ -235,6 +317,7 @@ fn update_state(state: &mut State) {
 
 pub struct State {
     board: Board,
+    input: Option<Action>,
     inputs: Vec<Input>,
     player: Trainer,
     t: Token,
@@ -253,7 +336,7 @@ impl State {
         let t = unsafe { Token::new() };
         let player = Trainer::new(pos, true);
         board.add_entity(&player, &t);
-        Self { board, inputs: vec![], player, t }
+        Self { board, input: None, inputs: vec![], player, t }
     }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }

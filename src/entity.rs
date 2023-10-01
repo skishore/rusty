@@ -6,27 +6,40 @@ use crate::cell::{self, Cell};
 
 //////////////////////////////////////////////////////////////////////////////
 
+// Constants
+
+const TRAINER_SPEED: f64 = 0.10;
+
+//////////////////////////////////////////////////////////////////////////////
+
 // Actual data definitions:
 
-#[derive(Debug)]
 pub struct EntityData {
     pub player: bool,
     pub removed: bool,
+    pub move_timer: i32,
+    pub turn_timer: i32,
     pub glyph: Glyph,
+    pub speed: f64,
     pub pos: Point,
 }
 
-#[derive(Debug)]
 pub struct PokemonData {
     pub species: String,
 }
 
-#[derive(Debug)]
 pub struct TrainerData {}
 
 fn trainer(pos: Point, player: bool) -> EntityRepr {
-    let glyph = Glyph::wide('@');
-    let base = EntityData { player, removed: false, glyph, pos };
+    let base = EntityData {
+        player,
+        removed: false,
+        move_timer: 0,
+        turn_timer: 0,
+        glyph: Glyph::wide('@'),
+        speed: TRAINER_SPEED,
+        pos,
+    };
     EntityRepr { base, data: EntityType::Trainer(TrainerData {}) }
 }
 
@@ -34,13 +47,11 @@ fn trainer(pos: Point, player: bool) -> EntityRepr {
 
 // Boilerplate follows...
 
-#[derive(Debug)]
 pub struct EntityRepr {
     base: EntityData,
     data: EntityType,
 }
 
-#[derive(Debug)]
 enum EntityType {
     Pokemon(PokemonData),
     Trainer(TrainerData),
