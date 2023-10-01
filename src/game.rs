@@ -5,7 +5,7 @@ use rand::random;
 
 use crate::assert_eq_size;
 use crate::base::{FOV, Glyph, HashMap, Matrix, Point};
-use crate::entity::{Entity, Token, Trainer};
+use crate::entity::{Entity, Token, Pokemon, Trainer};
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -67,7 +67,7 @@ impl Board {
     fn new(size: Point) -> Self {
         Self {
             fov: FOV::new(FOV_RADIUS),
-            map: Matrix::new(size, TILES.get(&'.').unwrap()),
+            map: Matrix::new(size, TILES.get(&'#').unwrap()),
             entity_index: 0,
             entity_at_pos: HashMap::new(),
             entities: vec![],
@@ -136,7 +136,11 @@ impl Board {
 // Map generation
 
 fn mapgen(map: &mut Matrix<&'static Tile>) {
-    map.fill(map.default);
+    let ft = TILES.get(&'.').unwrap();
+    let wt = TILES.get(&'#').unwrap();
+    let gt = TILES.get(&'"').unwrap();
+
+    map.fill(ft);
     let d100 = || random::<i32>().rem_euclid(100);
     let size = map.size;
 
@@ -185,8 +189,6 @@ fn mapgen(map: &mut Matrix<&'static Tile>) {
 
     let walls = automata();
     let grass = automata();
-    let wt = TILES.get(&'#').unwrap();
-    let gt = TILES.get(&'"').unwrap();
     for y in 0..size.1 {
         for x in 0..size.0 {
             let point = Point(x, y);
@@ -244,7 +246,9 @@ fn plan(board: &Board, e: &Entity, t: &Token, input: &mut Option<Action>) -> Act
     if entity.player {
         input.take().unwrap_or(Action::WaitForInput)
     } else {
-        Action::Idle
+        let dx = random::<i32>().rem_euclid(3) - 1;
+        let dy = random::<i32>().rem_euclid(3) - 1;
+        Action::Move(MoveData { dir: Point(dx, dy) })
     }
 }
 
@@ -256,7 +260,7 @@ fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
             if dir == Point::default() { return ActionResult::success(); }
             let target = e.base(&state.t).pos + dir;
             if let Status::Free = state.board.get_status(target) {
-                state.board.move_entity(&state.player, &mut state.t, target);
+                state.board.move_entity(&e, &mut state.t, target);
                 return ActionResult::success();
             }
             ActionResult::failure()
@@ -336,6 +340,21 @@ impl State {
         let t = unsafe { Token::new() };
         let player = Trainer::new(pos, true);
         board.add_entity(&player, &t);
+
+        let rng = |n: i32| random::<i32>().rem_euclid(n);
+        let pos = |board: &Board| {
+            for _ in 0..100 {
+                let p = Point(rng(size.0), rng(size.1));
+                if let Status::Free = board.get_status(p) { return Some(p); }
+            }
+            None
+        };
+        for _ in 0..20 {
+            if let Some(pos) = pos(&board) {
+                board.add_entity(&Pokemon::new(pos, "Pidgey"), &t);
+            }
+        }
+
         Self { board, input: None, inputs: vec![], player, t }
     }
 

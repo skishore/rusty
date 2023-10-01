@@ -1,7 +1,9 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use crate::base::{Glyph, Point};
+use lazy_static::lazy_static;
+
+use crate::base::{Glyph, HashMap, Point};
 use crate::cell::{self, Cell};
 
 //////////////////////////////////////////////////////////////////////////////
@@ -9,6 +11,20 @@ use crate::cell::{self, Cell};
 // Constants
 
 const TRAINER_SPEED: f64 = 0.10;
+
+lazy_static! {
+    static ref POKEMON_SPECIES: HashMap<&'static str, PokemonSpeciesData> = {
+        let items = [
+            ("Pidgey",  30, 0.33, Glyph::wide('P')),
+            ("Ratatta", 60, 0.25, Glyph::wide('R')),
+        ];
+        let mut result = HashMap::new();
+        for (name, hp, speed, glyph) in items {
+            result.insert(name, PokemonSpeciesData { name, glyph, speed, hp });
+        }
+        result
+    };
+}
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -24,11 +40,47 @@ pub struct EntityData {
     pub pos: Point,
 }
 
+pub struct PokemonSpeciesData {
+    pub name: &'static str,
+    pub glyph: Glyph,
+    pub speed: f64,
+    pub hp: i32,
+}
+
+pub struct PokemonIndividualData {
+    pub species: &'static PokemonSpeciesData,
+}
+
 pub struct PokemonData {
-    pub species: String,
+    pub data: Box<PokemonIndividualData>,
+    pub cur_hp: i32,
+    pub max_hp: i32,
 }
 
 pub struct TrainerData {}
+
+//////////////////////////////////////////////////////////////////////////////
+
+// Constructors
+
+fn pokemon(pos: Point, species: &str) -> EntityRepr {
+    let species = POKEMON_SPECIES.get(species).unwrap();
+    let data = PokemonData {
+        data: Box::new(PokemonIndividualData { species }),
+        cur_hp: species.hp,
+        max_hp: species.hp,
+    };
+    let base = EntityData {
+        player: false,
+        removed: false,
+        move_timer: 0,
+        turn_timer: 0,
+        glyph: species.glyph,
+        speed: species.speed,
+        pos,
+    };
+    EntityRepr { base, data: EntityType::Pokemon(data) }
+}
 
 fn trainer(pos: Point, player: bool) -> EntityRepr {
     let base = EntityData {
@@ -111,6 +163,10 @@ impl Deref for Pokemon {
 }
 
 impl Pokemon {
+    pub fn new(pos: Point, species: &str) -> Pokemon {
+        Pokemon(Entity(Rc::new(Cell::new(pokemon(pos, species)))))
+    }
+
     pub fn data<'a>(&'a self, t: &'a Token) -> &'a PokemonData {
         let data = &self.0.0.get(t).data;
         if let EntityType::Pokemon(x) = data { return &x; }
