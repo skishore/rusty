@@ -45,11 +45,19 @@ impl Glyph {
     }
 
     pub fn wdfg(ch: char, fg: i32) -> Glyph {
-        let r = (fg >> 8) & 0xf;
-        let g = (fg >> 4) & 0xf;
-        let b = (fg >> 0) & 0xf;
         let ch = Char((ch as u16) + (0xff00 - 0x20));
-        Glyph { ch, fg: Color((16 + b + 6 * g + 36 * r) as u8), bg: Color::default() }
+        Glyph { ch, fg: Glyph::color(fg), bg: Color::default() }
+    }
+
+    pub fn gray(&self) -> Glyph {
+        Glyph { ch: self.ch, fg: Color(16 + 216 + 4), bg: self.bg }
+    }
+
+    fn color(c: i32) -> Color {
+        let r = (c >> 8) & 0xf;
+        let g = (c >> 4) & 0xf;
+        let b = (c >> 0) & 0xf;
+        Color((16 + b + 6 * g + 36 * r) as u8)
     }
 }
 

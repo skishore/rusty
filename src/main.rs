@@ -157,8 +157,8 @@ fn input(key: Key) -> Option<Input> {
 }
 
 fn main() {
-    let size = Point(40, 40);
-    let game = State::new(size);
+    let size = Point(31, 31);
+    let game = State::new();
 
     let mut inputs = termion::async_stdin().keys();
     let mut screen = Screen::new(Point(2 * size.0, size.1));

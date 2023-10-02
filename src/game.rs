@@ -5,13 +5,16 @@ use rand::random;
 
 use crate::assert_eq_size;
 use crate::base::{FOV, Glyph, HashMap, Matrix, Point};
+use crate::cell::{self, Cell};
 use crate::entity::{Entity, Token, Pokemon, Trainer};
 
 //////////////////////////////////////////////////////////////////////////////
 
 // Constants
 
+const MAP_SIZE: i32 = 100;
 const FOV_RADIUS: i32 = 15;
+const MAX_MEMORY: i32 = 256;
 const VISION_RADIUS: i32 = 3;
 
 const MOVE_TIMER: i32 = 960;
@@ -51,6 +54,70 @@ lazy_static! {
 
 //////////////////////////////////////////////////////////////////////////////
 
+// Knowledge
+
+struct CellKnowledge {
+    age: i32,
+    tile: &'static Tile,
+    entity: Option<Glyph>,
+    visibility: i32,
+}
+assert_eq_size!(CellKnowledge, 24);
+
+#[derive(Default)]
+struct Knowledge {
+    map: HashMap<Point, CellKnowledge>,
+}
+
+impl Knowledge {
+    // Reads
+
+    fn get_cell(&self, point: Point) -> Option<&CellKnowledge> {
+        self.map.get(&point)
+    }
+
+    fn can_see_now(&self, point: Point) -> bool {
+        self.get_cell(point).map(|x| x.age == 0).unwrap_or(false)
+    }
+
+    fn remembers(&self, point: Point) -> bool {
+        self.map.contains_key(&point)
+    }
+
+    // Writes
+
+    fn update(&mut self, board: &Board, e: &Entity, t: &Token) {
+        let entity = e.base(t);
+        self.forget(entity.player);
+        let offset = Point(FOV_RADIUS, FOV_RADIUS) - entity.pos;
+
+        for point in &board.vision_items {
+            let visibility = board.vision_cache.get(*point + offset);
+            assert!(visibility >= 0);
+            let entity = board.get_entity_at(*point).map(|x| x.base(t).glyph);
+            let tile = board.map.get(*point);
+            let cell = CellKnowledge { age: 0, tile, entity, visibility };
+            self.map.insert(*point, cell);
+        }
+    }
+
+    fn forget(&mut self, player: bool) {
+        if player {
+            self.map.iter_mut().for_each(|x| x.1.age = 1);
+            return;
+        }
+
+        let mut removed: Vec<Point> = vec![];
+        for (key, val) in self.map.iter_mut() {
+            val.age += 1;
+            if val.age >= MAX_MEMORY { removed.push(*key); }
+        }
+        removed.iter().for_each(|x| { self.map.remove(x); });
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 // Board
 
 enum Status { Free, Blocked, Occupied }
@@ -61,16 +128,25 @@ struct Board {
     entity_index: usize,
     entity_at_pos: HashMap<Point, Entity>,
     entities: Vec<Entity>,
+    known: HashMap<usize, Box<Cell<Knowledge>>>,
+    vision_cache: Matrix<i32>,
+    vision_items: Vec<Point>,
 }
 
 impl Board {
     fn new(size: Point) -> Self {
+        let vision_side = 2 * FOV_RADIUS + 1;
+        let vision_size = Point(vision_side, vision_side);
+
         Self {
             fov: FOV::new(FOV_RADIUS),
             map: Matrix::new(size, TILES.get(&'#').unwrap()),
             entity_index: 0,
             entity_at_pos: HashMap::new(),
             entities: vec![],
+            known: HashMap::new(),
+            vision_cache: Matrix::new(vision_size, -1),
+            vision_items: vec![],
         }
     }
 
@@ -78,6 +154,14 @@ impl Board {
 
     fn get_active_entity(&self) -> &Entity {
         &self.entities[self.entity_index]
+    }
+
+    fn get_entity_at(&self, point: Point) -> Option<&Entity> {
+        self.entity_at_pos.get(&point)
+    }
+
+    fn get_known(&self, e: &Entity) -> &Cell<Knowledge> {
+        self.known.get(&e.id()).unwrap()
     }
 
     fn get_status(&self, point: Point) -> Status {
@@ -90,6 +174,7 @@ impl Board {
 
     fn add_entity(&mut self, e: &Entity, t: &Token) {
         self.entities.push(e.clone());
+        self.known.insert(e.id(), Box::new(Cell::new(Knowledge::default())));
         let collider = self.entity_at_pos.insert(e.base(t).pos, e.clone());
         assert!(collider.is_none());
     }
@@ -121,6 +206,7 @@ impl Board {
         assert!(existing.same(&e));
         let index = self.entities.iter().position(|x| x.same(&e)).unwrap();
         self.entities.remove(index);
+        self.known.remove(&e.id());
 
         // Fix up entity_index after removing the entity.
         if self.entity_index > index {
@@ -128,6 +214,45 @@ impl Board {
         } else if self.entity_index == self.entities.len() {
             self.entity_index = 0;
         }
+    }
+
+    // Field-of-vision
+
+    pub fn fill_vision_cache(&mut self, pos: Point) {
+        let offset = Point(FOV_RADIUS, FOV_RADIUS);
+        self.vision_cache.fill(-1);
+        self.vision_items.clear();
+
+        let blocked = |p: Point, prev: Option<&Point>| {
+            let lookup = p + offset;
+            let cached = self.vision_cache.get(lookup);
+
+            let visibility = (|| {
+                // These constant values come from Point.distanceNethack.
+                // They are chosen such that, in a field of tall grass, we'll
+                // only see cells at a distanceNethack <= kVisionRadius.
+                if prev.is_none() { return 100 * (VISION_RADIUS + 1) - 95 - 46 - 25; }
+
+                let tile = self.map.get(p + pos);
+                if tile.flags & FLAG_BLOCKED != 0 { return 0; }
+
+                let parent = prev.unwrap();
+                let obscure = tile.flags & FLAG_OBSCURE != 0;
+                let diagonal = p.0 != parent.0 && p.1 != parent.1;
+                let loss = if obscure { 95 + if diagonal { 46 } else { 0 } } else { 0 };
+                let prev = self.vision_cache.get(*parent + offset);
+                max(prev - loss, 0)
+            })();
+
+            if visibility > cached {
+                self.vision_cache.set(lookup, visibility);
+                if cached < 0 && 0 <= visibility {
+                    self.vision_items.push(p + pos);
+                }
+            }
+            visibility <= 0
+        };
+        self.fov.apply(blocked);
     }
 }
 
@@ -241,7 +366,7 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
     entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
 }
 
-fn plan(board: &Board, e: &Entity, t: &Token, input: &mut Option<Action>) -> Action {
+fn plan(known: &Knowledge, e: &Entity, t: &Token, input: &mut Option<Action>) -> Action {
     let entity = e.base(t);
     if entity.player {
         input.take().unwrap_or(Action::WaitForInput)
@@ -301,17 +426,34 @@ fn update_state(state: &mut State) {
         process_input(state, input);
     }
 
+    let mut update = false;
+
     while player_alive(&state) {
         let e = state.board.get_active_entity();
         if !turn_ready(e, &state.t) {
             state.board.advance_entity(&mut state.t);
             continue;
+        } else if needs_input(state) {
+            break;
         }
+
         let entity = e.clone();
-        let action = plan(&state.board, &entity, &state.t, &mut state.input);
+        state.board.fill_vision_cache(entity.base(&state.t).pos);
+        let known = state.board.get_known(&entity);
+        known.get_mut(&mut state.k).update(&state.board, &entity, &state.t);
+        let known = known.get(&state.k);
+
+        let action = plan(known, &entity, &state.t, &mut state.input);
         let result = act(state, &entity, action);
         if entity.base(&state.t).player && !result.success { break; }
         wait(&entity, &mut state.t, &result);
+        update = true;
+    }
+
+    if update {
+        let State { board, player, ref mut k, t, .. } = state;
+        board.fill_vision_cache(player.base(&t).pos);
+        board.get_known(&player).get_mut(k).update(&board, &player, &t);
     }
 }
 
@@ -324,11 +466,13 @@ pub struct State {
     input: Option<Action>,
     inputs: Vec<Input>,
     player: Trainer,
+    k: cell::Token<Knowledge>,
     t: Token,
 }
 
 impl State {
-    pub fn new(size: Point) -> Self {
+    pub fn new() -> Self {
+        let size = Point(MAP_SIZE, MAP_SIZE);
         let mut board = Board::new(size);
         let pos = Point(size.0 / 2, size.1 / 2);
 
@@ -337,6 +481,7 @@ impl State {
             if board.map.get(pos).flags & FLAG_BLOCKED == 0 { break; }
         }
 
+        let mut k = unsafe { cell::Token::new() };
         let t = unsafe { Token::new() };
         let player = Trainer::new(pos, true);
         board.add_entity(&player, &t);
@@ -355,7 +500,10 @@ impl State {
             }
         }
 
-        Self { board, input: None, inputs: vec![], player, t }
+        board.fill_vision_cache(player.base(&t).pos);
+        board.get_known(&player).get_mut(&mut k).update(&board, &player, &t);
+
+        Self { board, input: None, inputs: vec![], player, k, t }
     }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
@@ -364,53 +512,23 @@ impl State {
 
     pub fn render(&self, buffer: &mut Matrix<Glyph>) {
         let pos = self.player.base(&self.t).pos;
-        let offset = Point(FOV_RADIUS, FOV_RADIUS);
-        let vision = self.compute_vision(pos);
+        let known = self.board.get_known(&self.player).get(&self.k);
+        let offset = pos - Point(buffer.size.0 / 4, buffer.size.1 / 2);
         let unseen = Glyph::wide(' ');
 
         for y in 0..buffer.size.1 {
             for x in 0..(buffer.size.0 / 2) {
                 let point = Point(x, y);
-                let glyph = self.board.map.get(point).glyph;
-                let sight = vision.get(point - pos + offset);
-                buffer.set(Point(2 * x, y), if sight < 0 { unseen } else { glyph });
+                let glyph = match known.get_cell(point + offset) {
+                    Some(cell) => if cell.age > 0 {
+                        cell.tile.glyph.gray()
+                    } else {
+                        cell.entity.unwrap_or(cell.tile.glyph)
+                    },
+                    None => unseen,
+                };
+                buffer.set(Point(2 * x, y), glyph);
             }
         }
-
-        for entity in &self.board.entities {
-            let Point(x, y) = entity.base(&self.t).pos;
-            let seen = buffer.get(Point(2 * x, y)) != unseen;
-            if seen { buffer.set(Point(2 * x, y), entity.base(&self.t).glyph) }
-        }
-    }
-
-    pub fn compute_vision(&self, pos: Point) -> Matrix<i32> {
-        let side = 2 * FOV_RADIUS + 1;
-        let offset = Point(FOV_RADIUS, FOV_RADIUS);
-        let mut vision = Matrix::new(Point(side, side), -1);
-
-        let blocked = |p: Point, prev: Option<&Point>| {
-            let visibility = (|| {
-                // These constant values come from Point.distanceNethack.
-                // They are chosen such that, in a field of tall grass, we'll
-                // only see cells at a distanceNethack <= kVisionRadius.
-                if prev.is_none() { return 100 * (VISION_RADIUS + 1) - 95 - 46 - 25; }
-
-                let tile = self.board.map.get(p + pos);
-                if tile.flags & FLAG_BLOCKED != 0 { return 0; }
-
-                let parent = prev.unwrap();
-                let obscure = tile.flags & FLAG_OBSCURE != 0;
-                let diagonal = p.0 != parent.0 && p.1 != parent.1;
-                let loss = if obscure { 95 + if diagonal { 46 } else { 0 } } else { 0 };
-                let prev = vision.get(*parent + offset);
-                max(prev - loss, 0)
-            })();
-
-            vision.set(p + offset, visibility);
-            visibility <= 0
-        };
-        self.board.fov.apply(blocked);
-        vision
     }
 }

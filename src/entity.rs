@@ -133,9 +133,9 @@ impl Entity {
         &mut self.0.get_mut(t).base
     }
 
-    pub fn same(&self, other: &Entity) -> bool {
-        Rc::ptr_eq(&self.0, &other.0)
-    }
+    pub fn id(&self) -> usize { Rc::as_ptr(&self.0) as usize }
+
+    pub fn same(&self, other: &Entity) -> bool { Rc::ptr_eq(&self.0, &other.0) }
 
     pub fn test(self, t: &Token) -> ET {
         match &self.0.get(t).data {
