@@ -1,3 +1,5 @@
+#![feature(test)]
+
 mod base;
 mod cell;
 mod game;

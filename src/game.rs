@@ -532,3 +532,21 @@ impl State {
         }
     }
 }
+
+//////////////////////////////////////////////////////////////////////////////
+
+#[allow(soft_unstable)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+    extern crate test;
+
+    #[bench]
+    fn bench_add_two(b: &mut test::Bencher) {
+        let mut state = State::new();
+        b.iter(|| {
+            state.inputs.push(Input::Char('.'));
+            state.update();
+        });
+    }
+}
