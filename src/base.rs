@@ -13,8 +13,8 @@ macro_rules! assert_eq_size {
     };
 }
 
-pub type HashSet<K> = std::collections::HashSet<K>;
-pub type HashMap<K, V> = std::collections::HashMap<K, V>;
+pub type HashSet<K> = fxhash::FxHashSet<K>;
+pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 
 // Rendering helpers
 

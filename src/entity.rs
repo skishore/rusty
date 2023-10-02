@@ -18,7 +18,7 @@ lazy_static! {
             ("Pidgey",  30, 0.33, Glyph::wide('P')),
             ("Ratatta", 60, 0.25, Glyph::wide('R')),
         ];
-        let mut result = HashMap::new();
+        let mut result = HashMap::default();
         for (name, hp, speed, glyph) in items {
             result.insert(name, PokemonSpeciesData { name, glyph, speed, hp });
         }

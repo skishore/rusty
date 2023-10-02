@@ -44,7 +44,7 @@ lazy_static! {
             ('"', (FLAG_OBSCURE, Glyph::wdfg('"', 0x231), "tall grass")),
             ('#', (FLAG_BLOCKED, Glyph::wdfg('#', 0x010), "a tree")),
         ];
-        let mut result = HashMap::new();
+        let mut result = HashMap::default();
         for (ch, (flags, glyph, description)) in items {
             result.insert(ch, Tile { flags, glyph, description });
         }
@@ -142,9 +142,9 @@ impl Board {
             fov: FOV::new(FOV_RADIUS),
             map: Matrix::new(size, TILES.get(&'#').unwrap()),
             entity_index: 0,
-            entity_at_pos: HashMap::new(),
+            entity_at_pos: HashMap::default(),
             entities: vec![],
-            known: HashMap::new(),
+            known: HashMap::default(),
             vision_cache: Matrix::new(vision_size, -1),
             vision_items: vec![],
         }
