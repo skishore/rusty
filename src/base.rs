@@ -187,11 +187,12 @@ struct FOVNode {
 pub struct FOV {
     radius: i32,
     nodes: Vec<FOVNode>,
+    cache: Vec<i32>,
 }
 
 impl FOV {
     pub fn new(radius: i32) -> Self {
-        let mut result = Self { radius, nodes: vec![] };
+        let mut result = Self { radius, nodes: vec![], cache: vec![] };
         result.nodes.push(FOVNode::default());
         for i in 0..=radius {
             for j in 0..8 {
@@ -204,17 +205,17 @@ impl FOV {
         result
     }
 
-    pub fn apply<F: FnMut(Point, Option<&Point>) -> bool>(&self, mut blocked: F) {
+    pub fn apply<F: FnMut(Point, Option<&Point>) -> bool>(&mut self, mut blocked: F) {
         let mut index = 0;
-        let mut cache = vec![];
-        cache.push(0);
-        while index < cache.len() {
-            let node = &self.nodes[cache[index] as usize];
+        self.cache.push(0);
+        while index < self.cache.len() {
+            let node = &self.nodes[self.cache[index] as usize];
             let prev = if index > 0 { Some(&node.prev) } else { None };
             if blocked(node.next, prev) { index += 1; continue; }
-            for x in &node.children { cache.push(*x); }
+            for x in &node.children { self.cache.push(*x); }
             index += 1;
         }
+        self.cache.clear();
     }
 
     fn update(&mut self, node: usize, los: &Vec<Point>, i: usize) {
