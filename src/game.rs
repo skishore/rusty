@@ -24,6 +24,36 @@ pub enum Input { Escape, Char(char) }
 
 //////////////////////////////////////////////////////////////////////////////
 
+// FOV / vision scratchpad
+
+struct Vision {
+    cells_seen: Vec<Point>,
+    visibility: Matrix<i32>,
+}
+
+struct VS {
+    fov_scratch: Vec<i32>,
+    t: cell::Token<Knowledge>,
+    vision: Vision,
+}
+
+impl VS {
+    unsafe fn new() -> Self {
+        let vision_side = 2 * FOV_RADIUS + 1;
+        let vision_size = Point(vision_side, vision_side);
+        Self {
+            fov_scratch: vec![],
+            t: unsafe { cell::Token::new() },
+            vision: Vision {
+                cells_seen: vec![],
+                visibility: Matrix::new(vision_size, -1),
+            },
+        }
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 // Tile
 
 const FLAG_NONE: u32 = 0;
@@ -86,13 +116,13 @@ impl Knowledge {
 
     // Writes
 
-    fn update(&mut self, board: &Board, e: &Entity, t: &Token) {
+    fn update(&mut self, board: &Board, e: &Entity, t: &Token, vision: &Vision) {
         let entity = e.base(t);
         self.forget(entity.player);
         let offset = Point(FOV_RADIUS, FOV_RADIUS) - entity.pos;
 
-        for point in &board.vision_items {
-            let visibility = board.vision_cache.get(*point + offset);
+        for point in &vision.cells_seen {
+            let visibility = vision.visibility.get(*point + offset);
             assert!(visibility >= 0);
             let entity = board.get_entity_at(*point).map(|x| x.base(t).glyph);
             let tile = board.map.get(*point);
@@ -129,15 +159,10 @@ struct Board {
     entity_at_pos: HashMap<Point, Entity>,
     entities: Vec<Entity>,
     known: HashMap<usize, Box<Cell<Knowledge>>>,
-    vision_cache: Matrix<i32>,
-    vision_items: Vec<Point>,
 }
 
 impl Board {
     fn new(size: Point) -> Self {
-        let vision_side = 2 * FOV_RADIUS + 1;
-        let vision_size = Point(vision_side, vision_side);
-
         Self {
             fov: FOV::new(FOV_RADIUS),
             map: Matrix::new(size, TILES.get(&'#').unwrap()),
@@ -145,8 +170,6 @@ impl Board {
             entity_at_pos: HashMap::default(),
             entities: vec![],
             known: HashMap::default(),
-            vision_cache: Matrix::new(vision_size, -1),
-            vision_items: vec![],
         }
     }
 
@@ -160,8 +183,8 @@ impl Board {
         self.entity_at_pos.get(&point)
     }
 
-    fn get_known(&self, e: &Entity) -> &Cell<Knowledge> {
-        self.known.get(&e.id()).unwrap()
+    fn get_known<'a>(&'a self, e: &Entity, vs: &'a VS) -> &'a Knowledge {
+        self.known.get(&e.id()).unwrap().get(&vs.t)
     }
 
     fn get_status(&self, point: Point) -> Status {
@@ -172,11 +195,12 @@ impl Board {
 
     // Writes
 
-    fn add_entity(&mut self, e: &Entity, t: &Token) {
+    fn add_entity(&mut self, e: &Entity, t: &Token, vs: &mut VS) {
         self.entities.push(e.clone());
         self.known.insert(e.id(), Box::new(Cell::new(Knowledge::default())));
         let collider = self.entity_at_pos.insert(e.base(t).pos, e.clone());
         assert!(collider.is_none());
+        self.update_known(e, t, vs);
     }
 
     fn advance_entity(&mut self, t: &mut Token) {
@@ -218,14 +242,14 @@ impl Board {
 
     // Field-of-vision
 
-    pub fn fill_vision_cache(&mut self, pos: Point) {
+    pub fn compute_vision(&self, pos: Point, vs: &mut VS) {
         let offset = Point(FOV_RADIUS, FOV_RADIUS);
-        self.vision_cache.fill(-1);
-        self.vision_items.clear();
+        vs.vision.visibility.fill(-1);
+        vs.vision.cells_seen.clear();
 
         let blocked = |p: Point, prev: Option<&Point>| {
             let lookup = p + offset;
-            let cached = self.vision_cache.get(lookup);
+            let cached = vs.vision.visibility.get(lookup);
 
             let visibility = (|| {
                 // These constant values come from Point.distanceNethack.
@@ -240,19 +264,26 @@ impl Board {
                 let obscure = tile.flags & FLAG_OBSCURE != 0;
                 let diagonal = p.0 != parent.0 && p.1 != parent.1;
                 let loss = if obscure { 95 + if diagonal { 46 } else { 0 } } else { 0 };
-                let prev = self.vision_cache.get(*parent + offset);
+                let prev = vs.vision.visibility.get(*parent + offset);
                 max(prev - loss, 0)
             })();
 
             if visibility > cached {
-                self.vision_cache.set(lookup, visibility);
+                vs.vision.visibility.set(lookup, visibility);
                 if cached < 0 && 0 <= visibility {
-                    self.vision_items.push(p + pos);
+                    vs.vision.cells_seen.push(p + pos);
                 }
             }
             visibility <= 0
         };
-        self.fov.apply(blocked);
+        self.fov.apply(blocked, &mut vs.fov_scratch);
+    }
+
+    fn update_known<'a>(&'a self, e: &Entity, t: &Token, vs: &'a mut VS) -> &'a Knowledge {
+        self.compute_vision(e.base(&t).pos, vs);
+        let known = self.known.get(&e.id()).unwrap();
+        known.get_mut(&mut vs.t).update(self, e, t, &vs.vision);
+        known.get(&vs.t)
     }
 }
 
@@ -429,21 +460,17 @@ fn update_state(state: &mut State) {
     let mut update = false;
 
     while player_alive(&state) {
-        let e = state.board.get_active_entity();
-        if !turn_ready(e, &state.t) {
+        let entity = state.board.get_active_entity();
+        if !turn_ready(entity, &state.t) {
             state.board.advance_entity(&mut state.t);
             continue;
         } else if needs_input(state) {
             break;
         }
 
-        let entity = e.clone();
-        state.board.fill_vision_cache(entity.base(&state.t).pos);
-        let known = state.board.get_known(&entity);
-        known.get_mut(&mut state.k).update(&state.board, &entity, &state.t);
-        let known = known.get(&state.k);
-
-        let action = plan(known, &entity, &state.t, &mut state.input);
+        let known = state.board.update_known(entity, &state.t, &mut state.vision);
+        let action = plan(known, entity, &state.t, &mut state.input);
+        let entity = entity.clone();
         let result = act(state, &entity, action);
         if entity.base(&state.t).player && !result.success { break; }
         wait(&entity, &mut state.t, &result);
@@ -451,9 +478,7 @@ fn update_state(state: &mut State) {
     }
 
     if update {
-        let State { board, player, ref mut k, t, .. } = state;
-        board.fill_vision_cache(player.base(&t).pos);
-        board.get_known(&player).get_mut(k).update(&board, &player, &t);
+        state.board.update_known(&state.player, &state.t, &mut state.vision);
     }
 }
 
@@ -466,7 +491,7 @@ pub struct State {
     input: Option<Action>,
     inputs: Vec<Input>,
     player: Trainer,
-    k: cell::Token<Knowledge>,
+    vision: VS,
     t: Token,
 }
 
@@ -481,10 +506,10 @@ impl State {
             if board.map.get(pos).flags & FLAG_BLOCKED == 0 { break; }
         }
 
-        let mut k = unsafe { cell::Token::new() };
         let t = unsafe { Token::new() };
         let player = Trainer::new(pos, true);
-        board.add_entity(&player, &t);
+        let mut vision = unsafe { VS::new() };
+        board.add_entity(&player, &t, &mut vision);
 
         let rng = |n: i32| random::<i32>().rem_euclid(n);
         let pos = |board: &Board| {
@@ -496,14 +521,11 @@ impl State {
         };
         for _ in 0..20 {
             if let Some(pos) = pos(&board) {
-                board.add_entity(&Pokemon::new(pos, "Pidgey"), &t);
+                board.add_entity(&Pokemon::new(pos, "Pidgey"), &t, &mut vision);
             }
         }
 
-        board.fill_vision_cache(player.base(&t).pos);
-        board.get_known(&player).get_mut(&mut k).update(&board, &player, &t);
-
-        Self { board, input: None, inputs: vec![], player, k, t }
+        Self { board, input: None, inputs: vec![], player, vision, t }
     }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
@@ -512,7 +534,7 @@ impl State {
 
     pub fn render(&self, buffer: &mut Matrix<Glyph>) {
         let pos = self.player.base(&self.t).pos;
-        let known = self.board.get_known(&self.player).get(&self.k);
+        let known = self.board.get_known(&self.player, &self.vision);
         let offset = pos - Point(buffer.size.0 / 4, buffer.size.1 / 2);
         let unseen = Glyph::wide(' ');
 
