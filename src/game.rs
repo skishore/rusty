@@ -627,6 +627,13 @@ fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
 }
 
 fn process_input(state: &mut State, input: Input) {
+    if input == Input::Char('\t') || input == Input::BackTab {
+        let length = state.board.entities.len();
+        let shift = if input == Input::Char('\t') { 1 } else { length - 1 };
+        state.index = (state.index + shift) % length;
+        return;
+    }
+
     let dir = match input {
         Input::Char('h') => Some(Point(-1,  0)),
         Input::Char('j') => Some(Point( 0,  1)),
@@ -682,6 +689,8 @@ fn update_state(state: &mut State) {
 
     if update {
         state.board.update_known(&state.player, &state.t);
+        let entity = state.board.entities[state.index].clone();
+        state.board.update_known(&entity, &state.t);
     }
 }
 
@@ -691,6 +700,7 @@ fn update_state(state: &mut State) {
 
 pub struct State {
     board: Board,
+    index: usize,
     input: Option<Action>,
     inputs: Vec<Input>,
     player: Trainer,
@@ -728,7 +738,7 @@ impl State {
             }
         }
 
-        Self { board, input: None, inputs: vec![], player, t }
+        Self { board, index: 0, input: None, inputs: vec![], player, t }
     }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
@@ -736,9 +746,9 @@ impl State {
     pub fn update(&mut self) { update_state(self); }
 
     pub fn render(&self, buffer: &mut Matrix<Glyph>) {
-        let pos = self.player.base(&self.t).pos;
-        let known = self.board.get_known(&self.player);
-        let offset = pos - Point(buffer.size.0 / 4, buffer.size.1 / 2);
+        let entity = &self.board.entities[self.index];
+        let known = self.board.get_known(entity);
+        let offset = Point(0, 0);
         let unseen = Glyph::wide(' ');
 
         for y in 0..buffer.size.1 {
@@ -754,6 +764,15 @@ impl State {
                 };
                 buffer.set(Point(2 * x, y), glyph);
             }
+        }
+        for entity in known.entities.values() {
+            let Point(x, y) = entity.pos.get();
+            let color = if entity.age.get() > 0 {
+                if entity.moved.get() { 0x400 } else { 0x440 }
+            } else {
+                0x040
+            };
+            buffer.set(Point(2 * x, y), entity.glyph.get().fg(Color::black()).bg(color));
         }
     }
 }
