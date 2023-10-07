@@ -97,6 +97,8 @@ pub struct Matrix<T> {
 
 impl<T: Copy> Matrix<T> {
     pub fn new(size: Point, value: T) -> Self {
+        assert!(0 < size.0);
+        assert!(0 < size.1);
         let mut data = Vec::new();
         data.resize((size.0 * size.1) as usize, value);
         Self { data, size, default: value }

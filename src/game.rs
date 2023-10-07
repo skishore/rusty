@@ -7,6 +7,7 @@ use crate::assert_eq_size;
 use crate::base::{FOV, Glyph, HashMap, Matrix, Point};
 use crate::cell::{self, Cell};
 use crate::entity::{Entity, Token, Pokemon, Trainer};
+use crate::pathing::{DIRECTIONS, BFS, Status};
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -19,6 +20,9 @@ const VISION_RADIUS: i32 = 3;
 
 const MOVE_TIMER: i32 = 960;
 const TURN_TIMER: i32 = 120;
+
+const BFS_LIMIT_ATTACK: i32 = 6;
+const BFS_LIMIT_WANDER: i32 = 64;
 
 pub enum Input { Escape, Char(char) }
 
@@ -67,6 +71,12 @@ struct Tile {
 }
 assert_eq_size!(Tile, 24);
 
+impl Tile {
+    fn get(ch: char) -> &'static Tile { TILES.get(&ch).unwrap() }
+    fn blocked(&self) -> bool { self.flags & FLAG_BLOCKED != 0 }
+    fn obscure(&self) -> bool { self.flags & FLAG_OBSCURE != 0 }
+}
+
 lazy_static! {
     static ref TILES: HashMap<char, Tile> = {
         let items = [
@@ -102,16 +112,29 @@ struct Knowledge {
 impl Knowledge {
     // Reads
 
-    fn get_cell(&self, point: Point) -> Option<&CellKnowledge> {
-        self.map.get(&point)
+    fn get_cell(&self, p: Point) -> Option<&CellKnowledge> { self.map.get(&p) }
+
+    fn get_status(&self, p: Point) -> Option<Status> {
+        self.get_cell(p).map(|x| {
+            if x.entity.is_some() { return Status::Occupied; }
+            if x.tile.blocked() { Status::Blocked } else { Status::Free }
+        })
     }
 
-    fn can_see_now(&self, point: Point) -> bool {
-        self.get_cell(point).map(|x| x.age == 0).unwrap_or(false)
+    fn can_see_now(&self, p: Point) -> bool {
+        self.get_cell(p).map(|x| x.age == 0).unwrap_or(false)
     }
 
-    fn remembers(&self, point: Point) -> bool {
-        self.map.contains_key(&point)
+    fn remembers(&self, p: Point) -> bool {
+        self.map.contains_key(&p)
+    }
+
+    fn blocked(&self, p: Point) -> bool {
+        self.get_cell(p).map(|x| x.tile.blocked()).unwrap_or(false)
+    }
+
+    fn unblocked(&self, p: Point) -> bool {
+        self.get_cell(p).map(|x| !x.tile.blocked()).unwrap_or(false)
     }
 
     // Writes
@@ -150,8 +173,6 @@ impl Knowledge {
 
 // Board
 
-enum Status { Free, Blocked, Occupied }
-
 struct Board {
     fov: FOV,
     map: Matrix<&'static Tile>,
@@ -165,7 +186,7 @@ impl Board {
     fn new(size: Point) -> Self {
         Self {
             fov: FOV::new(FOV_RADIUS),
-            map: Matrix::new(size, TILES.get(&'#').unwrap()),
+            map: Matrix::new(size, Tile::get('#')),
             entity_index: 0,
             entity_at_pos: HashMap::default(),
             entities: vec![],
@@ -179,18 +200,17 @@ impl Board {
         &self.entities[self.entity_index]
     }
 
-    fn get_entity_at(&self, point: Point) -> Option<&Entity> {
-        self.entity_at_pos.get(&point)
+    fn get_entity_at(&self, p: Point) -> Option<&Entity> {
+        self.entity_at_pos.get(&p)
     }
 
     fn get_known<'a>(&'a self, e: &Entity, vs: &'a VS) -> &'a Knowledge {
         self.known.get(&e.id()).unwrap().get(&vs.t)
     }
 
-    fn get_status(&self, point: Point) -> Status {
-        if self.entity_at_pos.contains_key(&point) { return Status::Occupied; }
-        let blocked = self.map.get(point).flags & FLAG_BLOCKED != 0;
-        if blocked { Status::Blocked } else { Status::Free }
+    fn get_status(&self, p: Point) -> Status {
+        if self.entity_at_pos.contains_key(&p) { return Status::Occupied; }
+        if self.map.get(p).blocked() { Status::Blocked } else { Status::Free }
     }
 
     // Writes
@@ -258,12 +278,11 @@ impl Board {
                 if prev.is_none() { return 100 * (VISION_RADIUS + 1) - 95 - 46 - 25; }
 
                 let tile = self.map.get(p + pos);
-                if tile.flags & FLAG_BLOCKED != 0 { return 0; }
+                if tile.blocked() { return 0; }
 
                 let parent = prev.unwrap();
-                let obscure = tile.flags & FLAG_OBSCURE != 0;
                 let diagonal = p.0 != parent.0 && p.1 != parent.1;
-                let loss = if obscure { 95 + if diagonal { 46 } else { 0 } } else { 0 };
+                let loss = if tile.obscure() { 95 + if diagonal { 46 } else { 0 } } else { 0 };
                 let prev = vs.vision.visibility.get(*parent + offset);
                 max(prev - loss, 0)
             })();
@@ -292,12 +311,12 @@ impl Board {
 // Map generation
 
 fn mapgen(map: &mut Matrix<&'static Tile>) {
-    let ft = TILES.get(&'.').unwrap();
-    let wt = TILES.get(&'#').unwrap();
-    let gt = TILES.get(&'"').unwrap();
+    let ft = Tile::get('.');
+    let wt = Tile::get('#');
+    let gt = Tile::get('"');
 
     map.fill(ft);
-    let d100 = || random::<i32>().rem_euclid(100);
+    let d100 = || random::<u32>() % 100;
     let size = map.size;
 
     let automata = || -> Matrix<bool> {
@@ -397,14 +416,35 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
     entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
 }
 
+fn explore_near_point(known: &Knowledge, e: &Entity, t: &Token,
+                      source: Point, age: i32) -> Action {
+    let check = |p: Point| { known.get_status(p).unwrap_or(Status::Free) };
+    let done1 = |p: Point| {
+        let cell = known.get_cell(p);
+        if cell.map(|x| x.age <= age).unwrap_or(false) { return false; }
+        DIRECTIONS.iter().any(|x| known.unblocked(p + *x))
+    };
+    let done0 = |p: Point| {
+        done1(p) && DIRECTIONS.iter().all(|x| !known.blocked(p + *x))
+    };
+
+    let target = BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
+                 BFS(source, done1, BFS_LIMIT_WANDER, check));
+    match target {
+        Some(x) => {
+            let index = random::<usize>() % x.dirs.len();
+            Action::Move(MoveData { dir: x.dirs[index] })
+        }
+        None => Action::Idle,
+    }
+}
+
 fn plan(known: &Knowledge, e: &Entity, t: &Token, input: &mut Option<Action>) -> Action {
     let entity = e.base(t);
     if entity.player {
         input.take().unwrap_or(Action::WaitForInput)
     } else {
-        let dx = random::<i32>().rem_euclid(3) - 1;
-        let dy = random::<i32>().rem_euclid(3) - 1;
-        Action::Move(MoveData { dir: Point(dx, dy) })
+        explore_near_point(known, e, t, e.base(t).pos, 9999)
     }
 }
 
@@ -415,7 +455,7 @@ fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
         Action::Move(MoveData { dir }) => {
             if dir == Point::default() { return ActionResult::success(); }
             let target = e.base(&state.t).pos + dir;
-            if let Status::Free = state.board.get_status(target) {
+            if state.board.get_status(target) == Status::Free {
                 state.board.move_entity(&e, &mut state.t, target);
                 return ActionResult::success();
             }
@@ -503,7 +543,7 @@ impl State {
 
         loop {
             mapgen(&mut board.map);
-            if board.map.get(pos).flags & FLAG_BLOCKED == 0 { break; }
+            if !board.map.get(pos).blocked() { break; }
         }
 
         let t = unsafe { Token::new() };
