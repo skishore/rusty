@@ -28,7 +28,8 @@ const TURN_TIMER: i32 = 120;
 const BFS_LIMIT_ATTACK: i32 = 6;
 const BFS_LIMIT_WANDER: i32 = 64;
 
-pub enum Input { Escape, Char(char) }
+#[derive(Eq, PartialEq)]
+pub enum Input { Escape, BackTab, Char(char) }
 
 type StdCell<T> = std::cell::Cell<T>;
 

@@ -153,6 +153,7 @@ impl Stats {
 
 fn input(key: Key) -> Option<Input> {
     match key {
+        Key::BackTab => Some(Input::BackTab),
         Key::Char(ch) => Some(Input::Char(ch)),
         Key::End => Some(Input::Escape),
         _ => None,
