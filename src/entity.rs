@@ -130,8 +130,8 @@ pub struct Entity(Rc<Cell<EntityRepr>>);
 #[derive(Clone)]
 pub struct WeakEntity(Weak<Cell<EntityRepr>>);
 
-impl Into<WeakEntity> for &Entity {
-    fn into(self) -> WeakEntity { WeakEntity(Rc::downgrade(&self.0)) }
+impl From<&Entity> for WeakEntity {
+    fn from(val: &Entity) -> Self { WeakEntity(Rc::downgrade(&val.0)) }
 }
 
 impl Entity {
@@ -179,7 +179,7 @@ impl Pokemon {
 
     pub fn data<'a>(&'a self, t: &'a Token) -> &'a PokemonData {
         let data = &self.0.0.get(t).data;
-        if let EntityType::Pokemon(x) = data { return &x; }
+        if let EntityType::Pokemon(x) = data { return x; }
         unsafe { std::hint::unreachable_unchecked() }
     }
 
@@ -206,7 +206,7 @@ impl Trainer {
 
     pub fn data<'a>(&'a self, t: &'a Token) -> &'a TrainerData {
         let data = &self.0.0.get(t).data;
-        if let EntityType::Trainer(x) = data { return &x; }
+        if let EntityType::Trainer(x) = data { return x; }
         unsafe { std::hint::unreachable_unchecked() }
     }
 

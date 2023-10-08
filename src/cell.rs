@@ -21,11 +21,11 @@ impl<T> Cell<T> {
 
     #[inline(always)]
     pub fn get<'a>(&self, _: &'a Token<T>) -> &'a T {
-        return unsafe { &*self.value.get() }
+        unsafe { &*self.value.get() }
     }
 
     #[inline(always)]
     pub fn get_mut<'a>(&self, _: &'a mut Token<T>) -> &'a mut T {
-        return unsafe { &mut *self.value.get() }
+        unsafe { &mut *self.value.get() }
     }
 }

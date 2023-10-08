@@ -30,11 +30,11 @@ impl Default for Color {
     fn default() -> Self { Self(0xff) }
 }
 
-impl Into<Color> for i32 {
-    fn into(self) -> Color {
-        let r = (self >> 8) & 0xf;
-        let g = (self >> 4) & 0xf;
-        let b = (self >> 0) & 0xf;
+impl From<i32> for Color {
+    fn from(val: i32) -> Color {
+        let r = (val >> 8) & 0xf;
+        let g = (val >> 4) & 0xf;
+        let b = val & 0xf;
         Color((16 + b + 6 * g + 36 * r) as u8)
     }
 }
@@ -139,7 +139,7 @@ impl<T: Copy> Matrix<T> {
     pub fn contains(&self, point: Point) -> bool {
         let Point(px, py) = point;
         let Point(sx, sy) = self.size;
-        return 0 <= px && px < sx && 0 <= py && py < sy;
+        0 <= px && px < sx && 0 <= py && py < sy
     }
 
     #[inline(always)]
@@ -240,7 +240,7 @@ impl FOV {
         let prev = los[i];
         assert!(self.nodes[node].next == prev);
         if prev.len_l2() > (self.radius as f64) - 0.5 { return; }
-        if !(i + 1 < los.len()) { return; }
+        if i + 1 >= los.len() { return; }
 
         let next = los[i + 1];
         let child = (|| {

@@ -56,7 +56,7 @@ impl VS {
         let vision_size = Point(vision_side, vision_side);
         Self {
             fov_scratch: vec![],
-            t: unsafe { cell::Token::new() },
+            t: cell::Token::new(),
             vision: Vision {
                 cells_seen: vec![],
                 visibility: Matrix::new(vision_size, -1),
@@ -169,10 +169,7 @@ impl Knowledge {
             assert!(visibility >= 0);
 
             let entity = (|| {
-                let entity = board.get_entity_at(*point);
-                if entity.is_none() { return None; }
-
-                let entity = entity.unwrap();
+                let entity = board.get_entity_at(*point)?;
                 let glyph = entity.base(t).glyph;
                 let known = self.entities.entry(entity.id()).and_modify(|x| {
                     let old_pos = x.pos.get();
@@ -197,7 +194,7 @@ impl Knowledge {
                     };
                     Rc::new(known)
                 });
-                Some(known.clone())
+                Some(Rc::clone(known))
             })();
 
             let tile = board.map.get(*point);
@@ -299,7 +296,7 @@ impl Board {
 
     fn move_entity(&mut self, e: &Entity, t: &mut Token, to: Point) {
         let existing = self.entity_at_pos.remove(&e.base(t).pos).unwrap();
-        assert!(existing.same(&e));
+        assert!(existing.same(e));
         let collider = self.entity_at_pos.insert(to, existing);
         assert!(collider.is_none());
         e.base_mut(t).pos = to;
@@ -313,8 +310,8 @@ impl Board {
 
         // Remove entities other than the player.
         let existing = self.entity_at_pos.remove(&entity.pos).unwrap();
-        assert!(existing.same(&e));
-        let index = self.entities.iter().position(|x| x.same(&e)).unwrap();
+        assert!(existing.same(e));
+        let index = self.entities.iter().position(|x| x.same(e)).unwrap();
         self.entities.remove(index);
         self.known.remove(&e.id());
 
@@ -501,7 +498,7 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
     entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
 }
 
-fn explore_near_point(known: &Knowledge, e: &Entity, t: &Token,
+fn explore_near_point(known: &Knowledge, _e: &Entity, _t: &Token,
                       source: Point, age: i32) -> Action {
     let check = |p: Point| { known.get_status(p).unwrap_or(Status::Free) };
     let done1 = |p: Point| {
@@ -539,7 +536,7 @@ fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
             e.base_mut(&mut state.t).dir = dir;
             let target = e.base(&state.t).pos + dir;
             if state.board.get_status(target) == Status::Free {
-                state.board.move_entity(&e, &mut state.t, target);
+                state.board.move_entity(e, &mut state.t, target);
                 return ActionResult::success();
             }
             ActionResult::failure()
@@ -582,7 +579,7 @@ fn update_state(state: &mut State) {
 
     let mut update = false;
 
-    while player_alive(&state) {
+    while player_alive(state) {
         let entity = state.board.get_active_entity();
         if !turn_ready(entity, &state.t) {
             state.board.advance_entity(&mut state.t);
@@ -688,7 +685,7 @@ mod tests {
     extern crate test;
 
     #[bench]
-    fn bench_add_two(b: &mut test::Bencher) {
+    fn bench_state_update(b: &mut test::Bencher) {
         let mut state = State::new();
         b.iter(|| {
             state.inputs.push(Input::Char('.'));
