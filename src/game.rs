@@ -5,7 +5,7 @@ use lazy_static::lazy_static;
 use rand::random;
 
 use crate::assert_eq_size;
-use crate::base::{FOV, Glyph, HashMap, Matrix, Point};
+use crate::base::{Color, FOV, Glyph, HashMap, Matrix, Point};
 use crate::cell::{self, Cell};
 use crate::entity::{Entity, Token, Pokemon, Trainer, WeakEntity};
 use crate::pathing::{DIRECTIONS, BFS, Status};
@@ -666,7 +666,7 @@ impl State {
                 let point = Point(x, y);
                 let glyph = match known.get_cell(point + offset) {
                     Some(cell) => if cell.age > 0 {
-                        cell.tile.glyph.gray()
+                        cell.tile.glyph.fg(Color::gray())
                     } else {
                         cell.entity.as_ref().map(|x| x.glyph.get()).unwrap_or(cell.tile.glyph)
                     },

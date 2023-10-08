@@ -30,6 +30,20 @@ impl Default for Color {
     fn default() -> Self { Self(0xff) }
 }
 
+impl Into<Color> for i32 {
+    fn into(self) -> Color {
+        let r = (self >> 8) & 0xf;
+        let g = (self >> 4) & 0xf;
+        let b = (self >> 0) & 0xf;
+        Color((16 + b + 6 * g + 36 * r) as u8)
+    }
+}
+
+impl Color {
+    pub fn black() -> Color { Color(16) }
+    pub fn gray() -> Color { Color(16 + 216 + 4) }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Glyph {
     pub ch: Char,
@@ -44,20 +58,18 @@ impl Glyph {
         Glyph { ch, fg: Color::default(), bg: Color::default() }
     }
 
-    pub fn wdfg(ch: char, fg: i32) -> Glyph {
-        let ch = Char((ch as u16) + (0xff00 - 0x20));
-        Glyph { ch, fg: Glyph::color(fg), bg: Color::default() }
+    pub fn wdfg<T: Into<Color>>(ch: char, fg: T) -> Glyph {
+        Glyph::wide(ch).fg(fg)
     }
 
-    pub fn gray(&self) -> Glyph {
-        Glyph { ch: self.ch, fg: Color(16 + 216 + 4), bg: self.bg }
+    pub fn fg<T: Into<Color>>(mut self, color: T) -> Glyph {
+        self.fg = color.into();
+        self
     }
 
-    fn color(c: i32) -> Color {
-        let r = (c >> 8) & 0xf;
-        let g = (c >> 4) & 0xf;
-        let b = (c >> 0) & 0xf;
-        Color((16 + b + 6 * g + 36 * r) as u8)
+    pub fn bg<T: Into<Color>>(mut self, color: T) -> Glyph {
+        self.bg = color.into();
+        self
     }
 }
 
