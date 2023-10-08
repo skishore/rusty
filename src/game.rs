@@ -14,8 +14,11 @@ use crate::pathing::{DIRECTIONS, BFS, Status};
 // Constants
 
 const MAP_SIZE: i32 = 100;
-const FOV_RADIUS: i32 = 15;
 const MAX_MEMORY: i32 = 256;
+
+const FOV_RADIUS_SMALL: i32 = 12;
+const FOV_RADIUS_LARGE: i32 = 15;
+const VISION_ANGLE: f64 = std::f64::consts::TAU / 3.;
 const VISION_RADIUS: i32 = 3;
 
 const MOVE_TIMER: i32 = 960;
@@ -33,6 +36,7 @@ pub enum Input { Escape, Char(char) }
 struct Vision {
     cells_seen: Vec<Point>,
     visibility: Matrix<i32>,
+    offset: Point,
 }
 
 struct VS {
@@ -43,7 +47,8 @@ struct VS {
 
 impl VS {
     unsafe fn new() -> Self {
-        let vision_side = 2 * FOV_RADIUS + 1;
+        let radius = max(FOV_RADIUS_SMALL, FOV_RADIUS_LARGE);
+        let vision_side = 2 * radius + 1;
         let vision_size = Point(vision_side, vision_side);
         Self {
             fov_scratch: vec![],
@@ -51,6 +56,7 @@ impl VS {
             vision: Vision {
                 cells_seen: vec![],
                 visibility: Matrix::new(vision_size, -1),
+                offset: Point(radius, radius),
             },
         }
     }
@@ -142,7 +148,7 @@ impl Knowledge {
     fn update(&mut self, board: &Board, e: &Entity, t: &Token, vision: &Vision) {
         let entity = e.base(t);
         self.forget(entity.player);
-        let offset = Point(FOV_RADIUS, FOV_RADIUS) - entity.pos;
+        let offset = vision.offset - entity.pos;
 
         for point in &vision.cells_seen {
             let visibility = vision.visibility.get(*point + offset);
@@ -174,7 +180,8 @@ impl Knowledge {
 // Board
 
 struct Board {
-    fov: FOV,
+    fov_large: FOV,
+    fov_small: FOV,
     map: Matrix<&'static Tile>,
     entity_index: usize,
     entity_at_pos: HashMap<Point, Entity>,
@@ -185,7 +192,8 @@ struct Board {
 impl Board {
     fn new(size: Point) -> Self {
         Self {
-            fov: FOV::new(FOV_RADIUS),
+            fov_large: FOV::new(FOV_RADIUS_LARGE),
+            fov_small: FOV::new(FOV_RADIUS_SMALL),
             map: Matrix::new(size, Tile::get('#')),
             entity_index: 0,
             entity_at_pos: HashMap::default(),
@@ -262,13 +270,19 @@ impl Board {
 
     // Field-of-vision
 
-    pub fn compute_vision(&self, pos: Point, vs: &mut VS) {
-        let offset = Point(FOV_RADIUS, FOV_RADIUS);
+    fn compute_vision(&self, e: &Entity, t: &Token, vs: &mut VS) {
+        let entity = e.base(t);
+        let omni = entity.player;
+        let pos = entity.pos;
+        let dir = entity.dir;
+
         vs.vision.visibility.fill(-1);
         vs.vision.cells_seen.clear();
 
         let blocked = |p: Point, prev: Option<&Point>| {
-            let lookup = p + offset;
+            if !omni && !Board::in_vision_cone(dir, p) { return true; }
+
+            let lookup = p + vs.vision.offset;
             let cached = vs.vision.visibility.get(lookup);
 
             let visibility = (|| {
@@ -283,7 +297,7 @@ impl Board {
                 let parent = prev.unwrap();
                 let diagonal = p.0 != parent.0 && p.1 != parent.1;
                 let loss = if tile.obscure() { 95 + if diagonal { 46 } else { 0 } } else { 0 };
-                let prev = vs.vision.visibility.get(*parent + offset);
+                let prev = vs.vision.visibility.get(*parent + vs.vision.offset);
                 max(prev - loss, 0)
             })();
 
@@ -295,11 +309,19 @@ impl Board {
             }
             visibility <= 0
         };
-        self.fov.apply(blocked, &mut vs.fov_scratch);
+        let fov = if omni { &self.fov_large } else { &self.fov_small };
+        fov.apply(blocked, &mut vs.fov_scratch);
+    }
+
+    fn in_vision_cone(pos: Point, dir: Point) -> bool {
+        if pos == Point::default() || dir == Point::default() { return true; }
+        let dot = (pos.0 as i64 * dir.0 as i64 + pos.1 as i64 * dir.1 as i64) as f64;
+        let l2_product = (pos.len_l2_squared() as f64 * dir.len_l2_squared() as f64).sqrt();
+        dot / l2_product > (0.5 * VISION_ANGLE).cos()
     }
 
     fn update_known<'a>(&'a self, e: &Entity, t: &Token, vs: &'a mut VS) -> &'a Knowledge {
-        self.compute_vision(e.base(&t).pos, vs);
+        self.compute_vision(e, t, vs);
         let known = self.known.get(&e.id()).unwrap();
         known.get_mut(&mut vs.t).update(self, e, t, &vs.vision);
         known.get(&vs.t)
@@ -399,6 +421,11 @@ impl ActionResult {
     fn success() -> Self { Self { success: true,  moves: 0., turns: 1. } }
 }
 
+fn sample<T>(xs: &[T]) -> &T {
+    assert!(!xs.is_empty());
+    &xs[random::<usize>() % xs.len()]
+}
+
 fn charge(e: &Entity, t: &mut Token) {
     let entity = e.base_mut(t);
     let charge = (TURN_TIMER as f64 * entity.speed).round() as i32;
@@ -431,10 +458,7 @@ fn explore_near_point(known: &Knowledge, e: &Entity, t: &Token,
     let target = BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
                  BFS(source, done1, BFS_LIMIT_WANDER, check));
     match target {
-        Some(x) => {
-            let index = random::<usize>() % x.dirs.len();
-            Action::Move(MoveData { dir: x.dirs[index] })
-        }
+        Some(x) => Action::Move(MoveData { dir: *sample(&x.dirs) }),
         None => Action::Idle,
     }
 }
@@ -454,6 +478,7 @@ fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
         Action::WaitForInput => ActionResult::failure(),
         Action::Move(MoveData { dir }) => {
             if dir == Point::default() { return ActionResult::success(); }
+            e.base_mut(&mut state.t).dir = dir;
             let target = e.base(&state.t).pos + dir;
             if state.board.get_status(target) == Status::Free {
                 state.board.move_entity(&e, &mut state.t, target);
@@ -561,7 +586,8 @@ impl State {
         };
         for _ in 0..20 {
             if let Some(pos) = pos(&board) {
-                board.add_entity(&Pokemon::new(pos, "Pidgey"), &t, &mut vision);
+                let (dir, species) = (*sample(&DIRECTIONS), "Pidgey");
+                board.add_entity(&Pokemon::new(pos, dir, species), &t, &mut vision);
             }
         }
 

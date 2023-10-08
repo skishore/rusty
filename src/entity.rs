@@ -37,6 +37,7 @@ pub struct EntityData {
     pub turn_timer: i32,
     pub glyph: Glyph,
     pub speed: f64,
+    pub dir: Point,
     pub pos: Point,
 }
 
@@ -63,7 +64,7 @@ pub struct TrainerData {}
 
 // Constructors
 
-fn pokemon(pos: Point, species: &str) -> EntityRepr {
+fn pokemon(pos: Point, dir: Point, species: &str) -> EntityRepr {
     let species = POKEMON_SPECIES.get(species).unwrap();
     let data = PokemonData {
         data: Box::new(PokemonIndividualData { species }),
@@ -77,6 +78,7 @@ fn pokemon(pos: Point, species: &str) -> EntityRepr {
         turn_timer: 0,
         glyph: species.glyph,
         speed: species.speed,
+        dir,
         pos,
     };
     EntityRepr { base, data: EntityType::Pokemon(data) }
@@ -90,6 +92,7 @@ fn trainer(pos: Point, player: bool) -> EntityRepr {
         turn_timer: 0,
         glyph: Glyph::wide('@'),
         speed: TRAINER_SPEED,
+        dir: Point(1, 0),
         pos,
     };
     EntityRepr { base, data: EntityType::Trainer(TrainerData {}) }
@@ -163,8 +166,8 @@ impl Deref for Pokemon {
 }
 
 impl Pokemon {
-    pub fn new(pos: Point, species: &str) -> Pokemon {
-        Pokemon(Entity(Rc::new(Cell::new(pokemon(pos, species)))))
+    pub fn new(pos: Point, dir: Point, species: &str) -> Pokemon {
+        Pokemon(Entity(Rc::new(Cell::new(pokemon(pos, dir, species)))))
     }
 
     pub fn data<'a>(&'a self, t: &'a Token) -> &'a PokemonData {
