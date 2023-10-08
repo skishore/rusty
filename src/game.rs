@@ -1,4 +1,5 @@
 use std::cmp::{max, min};
+use std::rc::Rc;
 
 use lazy_static::lazy_static;
 use rand::random;
@@ -6,7 +7,7 @@ use rand::random;
 use crate::assert_eq_size;
 use crate::base::{FOV, Glyph, HashMap, Matrix, Point};
 use crate::cell::{self, Cell};
-use crate::entity::{Entity, Token, Pokemon, Trainer};
+use crate::entity::{Entity, Token, Pokemon, Trainer, WeakEntity};
 use crate::pathing::{DIRECTIONS, BFS, Status};
 
 //////////////////////////////////////////////////////////////////////////////
@@ -28,6 +29,8 @@ const BFS_LIMIT_ATTACK: i32 = 6;
 const BFS_LIMIT_WANDER: i32 = 64;
 
 pub enum Input { Escape, Char(char) }
+
+type StdCell<T> = std::cell::Cell<T>;
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -104,15 +107,25 @@ lazy_static! {
 
 struct CellKnowledge {
     age: i32,
+    entity: Option<Rc<EntityKnowledge>>,
     tile: &'static Tile,
-    entity: Option<Glyph>,
     visibility: i32,
 }
 assert_eq_size!(CellKnowledge, 24);
 
+struct EntityKnowledge {
+    age: StdCell<i32>,
+    pos: StdCell<Point>,
+    glyph: StdCell<Glyph>,
+    moved: StdCell<bool>,
+    _weak: WeakEntity,
+}
+assert_eq_size!(EntityKnowledge, 32);
+
 #[derive(Default)]
 struct Knowledge {
     map: HashMap<Point, CellKnowledge>,
+    entities: HashMap<usize, Rc<EntityKnowledge>>,
 }
 
 impl Knowledge {
@@ -153,16 +166,53 @@ impl Knowledge {
         for point in &vision.cells_seen {
             let visibility = vision.visibility.get(*point + offset);
             assert!(visibility >= 0);
-            let entity = board.get_entity_at(*point).map(|x| x.base(t).glyph);
+
+            let entity = (|| {
+                let entity = board.get_entity_at(*point);
+                if entity.is_none() { return None; }
+
+                let entity = entity.unwrap();
+                let glyph = entity.base(t).glyph;
+                let known = self.entities.entry(entity.id()).and_modify(|x| {
+                    let old_pos = x.pos.get();
+                    if !x.moved.get() && old_pos != *point {
+                        self.map.entry(old_pos).and_modify(|x| {
+                            assert!(x.entity.is_some());
+                            x.entity = None;
+                        });
+                    }
+
+                    x.age.set(0);
+                    x.pos.set(*point);
+                    x.glyph.set(glyph);
+                    x.moved.set(false);
+                }).or_insert_with(|| {
+                    let known = EntityKnowledge {
+                        age: 0.into(),
+                        pos: (*point).into(),
+                        glyph: glyph.into(),
+                        moved: false.into(),
+                        _weak: entity.into(),
+                    };
+                    Rc::new(known)
+                });
+                Some(known.clone())
+            })();
+
             let tile = board.map.get(*point);
-            let cell = CellKnowledge { age: 0, tile, entity, visibility };
-            self.map.insert(*point, cell);
+            let cell = CellKnowledge { age: 0, entity, tile, visibility };
+            let prev = self.map.insert(*point, cell);
+            if let Some(CellKnowledge { entity: Some(x), .. }) = prev {
+                assert!(x.pos.get() == *point);
+                if x.age.get() > 0 { x.moved.set(true); }
+            }
         }
     }
 
     fn forget(&mut self, player: bool) {
         if player {
             self.map.iter_mut().for_each(|x| x.1.age = 1);
+            self.entities.iter_mut().for_each(|x| x.1.age.set(1));
             return;
         }
 
@@ -172,6 +222,13 @@ impl Knowledge {
             if val.age >= MAX_MEMORY { removed.push(*key); }
         }
         removed.iter().for_each(|x| { self.map.remove(x); });
+
+        let mut removed: Vec<usize> = vec![];
+        for (key, val) in self.entities.iter_mut() {
+            let age = val.age.get() + 1;
+            if age >= MAX_MEMORY { removed.push(*key); } else { val.age.set(age); }
+        }
+        removed.iter().for_each(|x| { self.entities.remove(x); });
     }
 }
 
@@ -611,7 +668,7 @@ impl State {
                     Some(cell) => if cell.age > 0 {
                         cell.tile.glyph.gray()
                     } else {
-                        cell.entity.unwrap_or(cell.tile.glyph)
+                        cell.entity.as_ref().map(|x| x.glyph.get()).unwrap_or(cell.tile.glyph)
                     },
                     None => unseen,
                 };

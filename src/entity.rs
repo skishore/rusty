@@ -1,5 +1,5 @@
 use std::ops::Deref;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use lazy_static::lazy_static;
 
@@ -126,6 +126,13 @@ pub type Token = cell::Token<EntityRepr>;
 
 #[derive(Clone)]
 pub struct Entity(Rc<Cell<EntityRepr>>);
+
+#[derive(Clone)]
+pub struct WeakEntity(Weak<Cell<EntityRepr>>);
+
+impl Into<WeakEntity> for &Entity {
+    fn into(self) -> WeakEntity { WeakEntity(Rc::downgrade(&self.0)) }
+}
 
 impl Entity {
     pub fn base<'a>(&'a self, t: &'a Token) -> &'a EntityData {
