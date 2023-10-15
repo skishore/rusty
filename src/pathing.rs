@@ -1,4 +1,6 @@
-use crate::base::{Matrix, Point};
+use std::cmp::{max, min};
+
+use crate::base::{HashMap, LOS, Matrix, Point};
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -97,15 +99,17 @@ pub fn BFS<F: Fn(Point) -> bool, G: Fn(Point) -> Status>(
 
 // Heap, used for A*
 
-#[derive(Clone, Copy)] struct AStarHeapIndex(i32);
-#[derive(Clone, Copy)] struct AStarNodeIndex(i32);
+#[derive(Clone, Copy, Eq, PartialEq)] struct AStarHeapIndex(i32);
+#[derive(Clone, Copy, Eq, PartialEq)] struct AStarNodeIndex(i32);
+
+const DUMMY: AStarHeapIndex = AStarHeapIndex(-1);
 
 struct AStarNode {
     distance: i32,
-    score: i32,
     index: AStarHeapIndex,
-    predecessor: Point,
     pos: Point,
+    predecessor: Point,
+    score: i32,
 }
 
 #[derive(Default)]
@@ -114,19 +118,24 @@ struct AStarHeap {
     heap: Vec<AStarNodeIndex>,
 }
 
-impl AStarHeap {
+impl AStarNode {
+    fn new(pos: Point, predecessor: Point, distance: i32, score: i32) -> Self {
+        Self { distance, index: DUMMY, pos, predecessor, score }
+    }
+}
 
+impl AStarHeap {
     // Heap operations
 
-    fn is_empty(&self) -> bool { self.nodes.is_empty() }
+    fn is_empty(&self) -> bool { self.heap.is_empty() }
 
     fn extract_min(&mut self) -> AStarNodeIndex {
         let mut index = AStarHeapIndex(0);
         let result = self.get_heap(index);
-        self.mut_node(result).index = AStarHeapIndex(-1);
+        self.mut_node(result).index = DUMMY;
 
         let node = self.heap.pop().unwrap();
-        if self.heap.is_empty() { return result; }
+        if self.is_empty() { return result; }
 
         let limit = self.heap.len() as i32;
         let score = self.get_node(node).score;
@@ -216,4 +225,129 @@ impl AStarHeap {
     fn children(h: AStarHeapIndex) -> (AStarHeapIndex, AStarHeapIndex) {
         (AStarHeapIndex(2 * h.0 + 1), AStarHeapIndex(2 * h.0 + 2))
     }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+// A* for pathfinding to a known target
+
+const ASTAR_UNIT_COST: i32 = 16;
+const ASTAR_DIAGONAL_PENALTY: i32 = 2;
+const ASTAR_LOS_DIFF_PENALTY: i32 = 1;
+const ASTAR_OCCUPIED_PENALTY: i32 = 64;
+
+// "diff" penalizes paths that travel far from the direct line-of-sight
+// from the source to the target. In order to compute it, we figure out if
+// this line is "more horizontal" or "more vertical", then compute the the
+// distance from the point to this line orthogonal to this main direction.
+//
+// Adding this term to our heuristic means that it's no longer admissible,
+// but it provides two benefits that are enough for us to use it anyway:
+//
+//   1. By breaking score ties, we expand the fronter towards T faster than
+//      we would with a consistent heuristic. We complete the search sooner
+//      at the cost of not always finding an optimal path.
+//
+//   2. By biasing towards line-of-sight, we select paths that are visually
+//      more appealing than alternatives (e.g. that interleave cardinal and
+//      diagonal steps, rather than doing all the diagonal steps first).
+//
+#[allow(non_snake_case)]
+fn AStarHeuristic(p: Point, los: &Vec<Point>) -> i32 {
+    let Point(px, py) = p;
+    let Point(sx, sy) = los[0];
+    let Point(tx, ty) = los.last().unwrap();
+
+    let diff = (|| {
+        let dx = tx - sx;
+        let dy = ty - sy;
+        let l = (los.len() - 1) as i32;
+        if dx.abs() > dy.abs() {
+            let index = if dx > 0 { px - sx } else { sx - px };
+            if index < 0 { return (px - sx).abs() + (py - sy).abs() };
+            if index > l { return (px - tx).abs() + (py - ty).abs() };
+            (py - los[index as usize].1).abs()
+        } else {
+            let index = if dy > 0 { py - sy } else { sy - py };
+            if index < 0 { return (px - sx).abs() + (py - sy).abs(); }
+            if index > l { return (px - tx).abs() + (py - ty).abs(); }
+            (px - los[index as usize].0).abs()
+        }
+    })();
+
+    let x = (tx - px).abs();
+    let y = (ty - py).abs();
+    return ASTAR_UNIT_COST * max(x, y) +
+           ASTAR_DIAGONAL_PENALTY * min(x, y) +
+           ASTAR_LOS_DIFF_PENALTY * diff;
+}
+
+#[allow(non_snake_case)]
+pub fn AStar<F: Fn(Point) -> Status>(
+        source: Point, target: Point, limit: i32, check: F) -> Option<Vec<Point>> {
+    // Try line-of-sight - if that path is clear, then we don't need to search.
+    // As with the full search below, we don't check if source is blocked here.
+    let los = LOS(source, target);
+    let free = (|| {
+        for i in 1..los.len() - 1 {
+            if check(los[i]) != Status::Free { return false; }
+        }
+        return true;
+    })();
+    if free { return Some(los.into_iter().skip(1).collect()) }
+
+    let mut map: HashMap<Point, AStarNodeIndex> = HashMap::default();
+    let mut heap = AStarHeap::default();
+
+    let score = AStarHeuristic(source, &los);
+    let node = AStarNode::new(source, source, 0, score);
+    map.insert(source, heap.push(node));
+
+    for _ in 0..limit {
+        if heap.is_empty() { break; }
+        let cur = heap.extract_min();
+        let cur_pos = heap.get_node(cur).pos;
+        let cur_distance = heap.get_node(cur).distance;
+        if cur_pos == target {
+            let mut result = vec![];
+            let mut current = cur_pos;
+            while current != source {
+                result.push(current);
+                current = heap.get_node(*map.get(&current).unwrap()).predecessor;
+            }
+            return Some(result);
+        }
+
+        for dir in &DIRECTIONS {
+            let next = cur_pos + *dir;
+            let test = if next == target { Status::Free } else { check(next) };
+            if test == Status::Blocked { continue; }
+
+            let diagonal = dir.0 != 0 && dir.1 != 0;
+            let occipied = test == Status::Occupied;
+            let distance = cur_distance + ASTAR_UNIT_COST +
+                           if diagonal { ASTAR_DIAGONAL_PENALTY } else { 0 } +
+                           if occipied { ASTAR_OCCUPIED_PENALTY } else { 0 };
+
+            map.entry(next).and_modify(|x| {
+                // index != DUMMY is a check for if we've already extracted
+                // next from heap, needed since our heuristic is inadmissible.
+                //
+                // Using such a heuristic speeds up search in easy cases, with
+                // the downside that we don't always find an optimal path.
+                let existing = heap.mut_node(*x);
+                if existing.index != DUMMY && existing.distance > distance {
+                    existing.score += distance - existing.distance;
+                    existing.distance = distance;
+                    existing.predecessor = cur_pos;
+                }
+            }).or_insert_with(|| {
+                let score = distance + AStarHeuristic(next, &los);
+                let node = AStarNode::new(next, cur_pos, distance, score);
+                heap.push(node)
+            });
+        }
+    }
+
+    None
 }
