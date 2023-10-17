@@ -179,10 +179,9 @@ impl AStarHeap {
         self.set_heap(index, n);
     }
 
-    fn push(&mut self, node: AStarNode) -> AStarNodeIndex {
+    fn push(&mut self, mut node: AStarNode) -> AStarNodeIndex {
         assert!(node.index.0 == -1);
-        assert!(self.nodes.len() == self.heap.len());
-
+        node.index = AStarHeapIndex(self.heap.len() as i32);
         let result = AStarNodeIndex(self.nodes.len() as i32);
         self.nodes.push(node);
         self.heap.push(result);
@@ -315,6 +314,7 @@ pub fn AStar<F: Fn(Point) -> Status>(
                 result.push(current);
                 current = heap.get_node(*map.get(&current).unwrap()).predecessor;
             }
+            result.reverse();
             return Some(result);
         }
 

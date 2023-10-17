@@ -8,7 +8,7 @@ use rand::random;
 use crate::assert_eq_size;
 use crate::base::{Color, FOV, Glyph, HashMap, Matrix, Point};
 use crate::entity::{Entity, Token, Pokemon, Trainer, WeakEntity};
-use crate::pathing::{DIRECTIONS, BFS, Status};
+use crate::pathing::{DIRECTIONS, AStar, BFS, BFSResult, Status};
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -25,7 +25,9 @@ const VISION_RADIUS: i32 = 3;
 const MOVE_TIMER: i32 = 960;
 const TURN_TIMER: i32 = 120;
 
-const BFS_LIMIT_ATTACK: i32 = 6;
+const ASTAR_LIMIT_ATTACK: i32 = 32;
+const ASTAR_LIMIT_WANDER: i32 = 256;
+const BFS_LIMIT_ATTACK: i32 = 8;
 const BFS_LIMIT_WANDER: i32 = 64;
 
 #[derive(Eq, PartialEq)]
@@ -514,7 +516,7 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
     entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
 }
 
-fn explore_near_point(known: &Knowledge, _e: &Entity, _t: &Token,
+fn explore_near_point(known: &Knowledge, e: &Entity, t: &Token,
                       source: Point, age: i32) -> Action {
     let check = |p: Point| { known.get_status(p).unwrap_or(Status::Free) };
     let done1 = |p: Point| {
@@ -526,12 +528,25 @@ fn explore_near_point(known: &Knowledge, _e: &Entity, _t: &Token,
         done1(p) && DIRECTIONS.iter().all(|x| !known.blocked(p + *x))
     };
 
-    let target = BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
+    let result = BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
                  BFS(source, done1, BFS_LIMIT_WANDER, check));
-    match target {
-        Some(x) => Action::Move(MoveData { dir: *sample(&x.dirs) }),
-        None => Action::Idle,
-    }
+
+    let dir = (|| {
+        let pos = e.base(t).pos;
+        let BFSResult { dirs, mut targets } = result?;
+        if dirs.is_empty() || targets.is_empty() { return None; }
+        let target = (|| {
+            if source == pos { return *sample(&targets); }
+            targets.sort_by_cached_key(|x| (*x - pos).len_l2_squared());
+            targets[0]
+        })();
+        let path = AStar(pos, target, ASTAR_LIMIT_WANDER, check).unwrap_or(vec![]);
+        if path.is_empty() { return Some(*sample(&dirs)); }
+        Some(path[0] - pos)
+    })();
+
+    let dir = dir.unwrap_or_else(|| *sample(&DIRECTIONS));
+    Action::Move(MoveData { dir })
 }
 
 fn plan(known: &Knowledge, e: &Entity, t: &Token, input: &mut Option<Action>) -> Action {
