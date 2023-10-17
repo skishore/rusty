@@ -102,13 +102,14 @@ pub fn BFS<F: Fn(Point) -> bool, G: Fn(Point) -> Status>(
 #[derive(Clone, Copy, Eq, PartialEq)] struct AStarHeapIndex(i32);
 #[derive(Clone, Copy, Eq, PartialEq)] struct AStarNodeIndex(i32);
 
-const DUMMY: AStarHeapIndex = AStarHeapIndex(-1);
+const NOT_IN_HEAP: AStarHeapIndex = AStarHeapIndex(-1);
+const SOURCE_NODE: AStarNodeIndex = AStarNodeIndex(-1);
 
 struct AStarNode {
     distance: i32,
     index: AStarHeapIndex,
+    parent: AStarNodeIndex,
     pos: Point,
-    predecessor: Point,
     score: i32,
 }
 
@@ -119,8 +120,8 @@ struct AStarHeap {
 }
 
 impl AStarNode {
-    fn new(pos: Point, predecessor: Point, distance: i32, score: i32) -> Self {
-        Self { distance, index: DUMMY, pos, predecessor, score }
+    fn new(pos: Point, parent: AStarNodeIndex, distance: i32, score: i32) -> Self {
+        Self { distance, index: NOT_IN_HEAP, parent, pos, score }
     }
 }
 
@@ -132,7 +133,7 @@ impl AStarHeap {
     fn extract_min(&mut self) -> AStarNodeIndex {
         let mut index = AStarHeapIndex(0);
         let result = self.get_heap(index);
-        self.mut_node(result).index = DUMMY;
+        self.mut_node(result).index = NOT_IN_HEAP;
 
         let node = self.heap.pop().unwrap();
         if self.is_empty() { return result; }
@@ -299,51 +300,52 @@ pub fn AStar<F: Fn(Point) -> Status>(
     let mut heap = AStarHeap::default();
 
     let score = AStarHeuristic(source, &los);
-    let node = AStarNode::new(source, source, 0, score);
+    let node = AStarNode::new(source, SOURCE_NODE, 0, score);
     map.insert(source, heap.push(node));
 
     for _ in 0..limit {
         if heap.is_empty() { break; }
-        let cur = heap.extract_min();
-        let cur_pos = heap.get_node(cur).pos;
-        let cur_distance = heap.get_node(cur).distance;
-        if cur_pos == target {
+        let prev = heap.extract_min();
+        let prev_pos = heap.get_node(prev).pos;
+        let prev_distance = heap.get_node(prev).distance;
+        if prev_pos == target {
             let mut result = vec![];
-            let mut current = cur_pos;
-            while current != source {
-                result.push(current);
-                current = heap.get_node(*map.get(&current).unwrap()).predecessor;
+            let mut current = heap.get_node(prev);
+            while current.pos != source {
+                result.push(current.pos);
+                current = heap.get_node(current.parent);
             }
             result.reverse();
             return Some(result);
         }
 
         for dir in &DIRECTIONS {
-            let next = cur_pos + *dir;
+            let next = prev_pos + *dir;
             let test = if next == target { Status::Free } else { check(next) };
             if test == Status::Blocked { continue; }
 
             let diagonal = dir.0 != 0 && dir.1 != 0;
             let occipied = test == Status::Occupied;
-            let distance = cur_distance + ASTAR_UNIT_COST +
+            let distance = prev_distance + ASTAR_UNIT_COST +
                            if diagonal { ASTAR_DIAGONAL_PENALTY } else { 0 } +
                            if occipied { ASTAR_OCCUPIED_PENALTY } else { 0 };
 
             map.entry(next).and_modify(|x| {
-                // index != DUMMY is a check for if we've already extracted
-                // next from heap, needed since our heuristic is inadmissible.
+                // index != NOT_IN_HEAP checks if we've already extracted next
+                // from heap. We need it since our heuristic is inadmissible.
                 //
                 // Using such a heuristic speeds up search in easy cases, with
                 // the downside that we don't always find an optimal path.
                 let existing = heap.mut_node(*x);
-                if existing.index != DUMMY && existing.distance > distance {
+                if existing.index != NOT_IN_HEAP && existing.distance > distance {
                     existing.score += distance - existing.distance;
                     existing.distance = distance;
-                    existing.predecessor = cur_pos;
+                    existing.parent = prev;
+                    heap.heapify(*x);
                 }
             }).or_insert_with(|| {
                 let score = distance + AStarHeuristic(next, &los);
-                let node = AStarNode::new(next, cur_pos, distance, score);
+                let node = AStarNode::new(next, prev, distance, score);
                 heap.push(node)
             });
         }
