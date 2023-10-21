@@ -7,7 +7,7 @@ use rand::random;
 
 use crate::assert_eq_size;
 use crate::base::{Color, FOV, Glyph, HashMap, Matrix, Point};
-use crate::entity::{Entity, Token, Pokemon, Trainer, WeakEntity};
+use crate::entity::{Entity, ETRef, Token, Pokemon, Trainer, WeakEntity};
 use crate::pathing::{DIRECTIONS, AStar, BFS, BFSResult, Status};
 
 //////////////////////////////////////////////////////////////////////////////
@@ -15,7 +15,7 @@ use crate::pathing::{DIRECTIONS, AStar, BFS, BFSResult, Status};
 // Constants
 
 const MAP_SIZE: i32 = 100;
-const MAX_MEMORY: i32 = 256;
+const MAX_MEMORY: i32 = 1024;
 
 const FOV_RADIUS_SMALL: i32 = 12;
 const FOV_RADIUS_LARGE: i32 = 15;
@@ -24,6 +24,8 @@ const VISION_RADIUS: i32 = 3;
 
 const MOVE_TIMER: i32 = 960;
 const TURN_TIMER: i32 = 120;
+
+const WANDER_TURNS: f64 = 3.;
 
 const ASTAR_LIMIT_ATTACK: i32 = 32;
 const ASTAR_LIMIT_WANDER: i32 = 256;
@@ -475,7 +477,7 @@ fn mapgen(map: &mut Matrix<&'static Tile>) {
 
 // Game logic
 
-pub struct MoveData { dir: Point }
+pub struct MoveData { dir: Point, turns: f64 }
 
 pub enum Action {
     Idle,
@@ -491,7 +493,8 @@ struct ActionResult {
 
 impl ActionResult {
     fn failure() -> Self { Self { success: false, moves: 0., turns: 1. } }
-    fn success() -> Self { Self { success: true,  moves: 0., turns: 1. } }
+    fn success() -> Self { Self::success_turns(1.) }
+    fn success_turns(turns: f64) -> Self { Self { success: true,  moves: 0., turns } }
 }
 
 fn sample<T>(xs: &[T]) -> &T {
@@ -517,7 +520,7 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
 }
 
 fn explore_near_point(known: &Knowledge, e: &Entity, t: &Token,
-                      source: Point, age: i32) -> Action {
+                      source: Point, age: i32, turns: f64) -> Action {
     let check = |p: Point| { known.get_status(p).unwrap_or(Status::Free) };
     let done1 = |p: Point| {
         let cell = known.get_cell(p);
@@ -546,15 +549,30 @@ fn explore_near_point(known: &Knowledge, e: &Entity, t: &Token,
     })();
 
     let dir = dir.unwrap_or_else(|| *sample(&DIRECTIONS));
-    Action::Move(MoveData { dir })
+    Action::Move(MoveData { dir, turns })
 }
 
-fn plan(known: &Knowledge, e: &Entity, t: &Token, input: &mut Option<Action>) -> Action {
+fn wander(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
+    let wander = &mut e.data_mut(t).wander;
+    wander.time = wander.time - 1;
+    if wander.time < 0 {
+        wander.wait = !wander.wait;
+        let multiplier = if wander.wait { WANDER_TURNS } else { 1. };
+        let limit = max(1, (16. * multiplier).round() as i32);
+        wander.time = random::<i32>().rem_euclid(limit);
+    }
+    if wander.wait { return Action::Idle; }
+    explore_near_point(known, e, t, e.base(t).pos, 9999, WANDER_TURNS)
+}
+
+fn plan(known: &Knowledge, e: &Entity, t: &mut Token, input: &mut Option<Action>) -> Action {
     let entity = e.base(t);
     if entity.player {
-        input.take().unwrap_or(Action::WaitForInput)
-    } else {
-        explore_near_point(known, e, t, e.base(t).pos, 9999)
+        return input.take().unwrap_or(Action::WaitForInput)
+    }
+    match e.test_ref(t) {
+        ETRef::Pokemon(x) => wander(known, x, t),
+        ETRef::Trainer(_) => Action::Idle,
     }
 }
 
@@ -562,13 +580,13 @@ fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
     match action {
         Action::Idle => ActionResult::success(),
         Action::WaitForInput => ActionResult::failure(),
-        Action::Move(MoveData { dir }) => {
-            if dir == Point::default() { return ActionResult::success(); }
+        Action::Move(MoveData { dir ,turns }) => {
+            if dir == Point::default() { return ActionResult::success_turns(turns); }
             e.base_mut(&mut state.t).dir = dir;
             let target = e.base(&state.t).pos + dir;
             if state.board.get_status(target) == Status::Free {
                 state.board.move_entity(e, &mut state.t, target);
-                return ActionResult::success();
+                return ActionResult::success_turns(turns);
             }
             ActionResult::failure()
         }
@@ -588,7 +606,7 @@ fn process_input(state: &mut State, input: Input) {
         Input::Char('.') => Some(Point( 0,  0)),
         _ => None,
     };
-    state.input = dir.map(|x| Action::Move(MoveData { dir: x }));
+    state.input = dir.map(|x| Action::Move(MoveData { dir: x, turns: 1. }));
 }
 
 fn update_state(state: &mut State) {
@@ -621,7 +639,7 @@ fn update_state(state: &mut State) {
 
         let entity = entity.clone();
         let known = state.board.update_known(&entity, &state.t);
-        let action = plan(known, &entity, &state.t, &mut state.input);
+        let action = plan(known, &entity, &mut state.t, &mut state.input);
 
         let result = act(state, &entity, action);
         if entity.base(&state.t).player && !result.success { break; }
@@ -669,9 +687,10 @@ impl State {
             }
             None
         };
+        let options = ["Pidgey", "Ratatta"];
         for _ in 0..20 {
             if let Some(pos) = pos(&board) {
-                let (dir, species) = (*sample(&DIRECTIONS), "Pidgey");
+                let (dir, species) = (*sample(&DIRECTIONS), *sample(&options));
                 board.add_entity(&Pokemon::new(pos, dir, species), &t);
             }
         }

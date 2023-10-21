@@ -30,6 +30,11 @@ lazy_static! {
 
 // Actual data definitions:
 
+pub struct WanderState {
+    pub time: i32,
+    pub wait: bool,
+}
+
 pub struct EntityData {
     pub player: bool,
     pub removed: bool,
@@ -54,6 +59,7 @@ pub struct PokemonIndividualData {
 
 pub struct PokemonData {
     pub data: Box<PokemonIndividualData>,
+    pub wander: WanderState,
     pub cur_hp: i32,
     pub max_hp: i32,
 }
@@ -68,6 +74,7 @@ fn pokemon(pos: Point, dir: Point, species: &str) -> EntityRepr {
     let species = POKEMON_SPECIES.get(species).unwrap();
     let data = PokemonData {
         data: Box::new(PokemonIndividualData { species }),
+        wander: WanderState { time: 0, wait: false },
         cur_hp: species.hp,
         max_hp: species.hp,
     };
