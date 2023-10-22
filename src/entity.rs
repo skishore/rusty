@@ -55,13 +55,14 @@ pub struct PokemonSpeciesData {
 
 pub struct PokemonIndividualData {
     pub species: &'static PokemonSpeciesData,
+    pub trainer: WeakTrainer,
+    pub cur_hp: i32,
+    pub max_hp: i32,
 }
 
 pub struct PokemonData {
-    pub data: Box<PokemonIndividualData>,
+    pub individual: Box<PokemonIndividualData>,
     pub wander: WanderState,
-    pub cur_hp: i32,
-    pub max_hp: i32,
 }
 
 pub struct TrainerData {}
@@ -70,13 +71,17 @@ pub struct TrainerData {}
 
 // Constructors
 
-fn pokemon(pos: Point, dir: Point, species: &str) -> EntityRepr {
+fn pokemon(pos: Point, dir: Point, species: &str, trainer: Option<&Trainer>) -> EntityRepr {
     let species = POKEMON_SPECIES.get(species).unwrap();
-    let data = PokemonData {
-        data: Box::new(PokemonIndividualData { species }),
-        wander: WanderState { time: 0, wait: false },
+    let individual = PokemonIndividualData {
+        species,
+        trainer: trainer.map(|x| x.into()).unwrap_or_default(),
         cur_hp: species.hp,
         max_hp: species.hp,
+    };
+    let data = PokemonData {
+        individual: Box::new(individual),
+        wander: WanderState { time: 0, wait: false },
     };
     let base = EntityData {
         player: false,
@@ -132,13 +137,19 @@ pub enum ETRef<'a> {
 pub type Token = cell::Token<EntityRepr>;
 
 #[derive(Clone)]
+#[repr(transparent)]
 pub struct Entity(Rc<Cell<EntityRepr>>);
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
+#[repr(transparent)]
 pub struct WeakEntity(Weak<Cell<EntityRepr>>);
 
 impl From<&Entity> for WeakEntity {
-    fn from(val: &Entity) -> Self { WeakEntity(Rc::downgrade(&val.0)) }
+    fn from(val: &Entity) -> Self { Self(Rc::downgrade(&val.0)) }
+}
+
+impl WeakEntity {
+    pub fn upgrade(&self) -> Option<Entity> { self.0.upgrade().map(|x| Entity(x)) }
 }
 
 impl Entity {
@@ -174,14 +185,31 @@ impl Entity {
 #[repr(transparent)]
 pub struct Pokemon(Entity);
 
+#[derive(Clone, Default)]
+#[repr(transparent)]
+pub struct WeakPokemon(WeakEntity);
+
+impl From<&Pokemon> for WeakPokemon {
+    fn from(val: &Pokemon) -> Self { Self((&val.0).into()) }
+}
+
+impl WeakPokemon {
+    pub fn upgrade(&self) -> Option<Pokemon> { self.0.upgrade().map(|x| Pokemon(x)) }
+}
+
 impl Deref for Pokemon {
     type Target = Entity;
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 
+impl Deref for WeakPokemon {
+    type Target = WeakEntity;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
 impl Pokemon {
-    pub fn new(pos: Point, dir: Point, species: &str) -> Pokemon {
-        Pokemon(Entity(Rc::new(Cell::new(pokemon(pos, dir, species)))))
+    pub fn new(pos: Point, dir: Point, species: &str, trainer: Option<&Trainer>) -> Pokemon {
+        Pokemon(Entity(Rc::new(Cell::new(pokemon(pos, dir, species, trainer)))))
     }
 
     pub fn data<'a>(&'a self, t: &'a Token) -> &'a PokemonData {
@@ -201,8 +229,25 @@ impl Pokemon {
 #[repr(transparent)]
 pub struct Trainer(Entity);
 
+#[derive(Clone, Default)]
+#[repr(transparent)]
+pub struct WeakTrainer(WeakEntity);
+
+impl From<&Trainer> for WeakTrainer {
+    fn from(val: &Trainer) -> Self { Self((&val.0).into()) }
+}
+
+impl WeakTrainer {
+    pub fn upgrade(&self) -> Option<Trainer> { self.0.upgrade().map(|x| Trainer(x)) }
+}
+
 impl Deref for Trainer {
     type Target = Entity;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl Deref for WeakTrainer {
+    type Target = WeakEntity;
     fn deref(&self) -> &Self::Target { &self.0 }
 }
 

@@ -132,9 +132,10 @@ impl Knowledge {
     // Writes
 
     fn update(&mut self, board: &BaseBoard, e: &Entity, t: &Token, vision: &Vision) {
-        let base = e.base(t);
-        self.forget(base.player);
-        let offset = vision.offset - base.pos;
+        let my_entity = e.base(t);
+        self.forget(my_entity.player);
+        let offset = vision.offset - my_entity.pos;
+        let my_trainer = trainer(e, t);
 
         for point in &vision.cells_seen {
             let visibility = vision.visibility.get(*point + offset);
@@ -142,7 +143,7 @@ impl Knowledge {
 
             let entity = (|| {
                 let entity = board.get_entity_at(*point)?;
-                let rival = if let ETRef::Trainer(_) = entity.test_ref(t) { true } else { false };
+                let rival = !trainers_match(&my_trainer, &trainer(entity, t));
                 let glyph = entity.base(t).glyph;
                 let known = self.entities.entry(entity.id()).and_modify(|x| {
                     let old_pos = x.pos.get();
@@ -152,7 +153,6 @@ impl Knowledge {
                             x.entity = None;
                         });
                     }
-
                     x.age.set(0);
                     x.pos.set(*point);
                     x.glyph.set(glyph);
@@ -522,6 +522,18 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
     entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
 }
 
+fn trainer(e: &Entity, t: &Token) -> Option<Trainer> {
+    match e.test_ref(t) {
+        ETRef::Pokemon(x) => x.data(t).individual.trainer.upgrade(),
+        ETRef::Trainer(x) => Some(x.clone()),
+    }
+}
+
+fn trainers_match(a: &Option<Trainer>, b: &Option<Trainer>) -> bool {
+    if let (Some(aa), Some(bb)) = (a, b) { return aa.same(bb); }
+    a.is_none() && b.is_none()
+}
+
 fn explore_near(known: &Knowledge, e: &Entity, t: &Token,
                 source: Point, age: i32, turns: f64) -> Action {
     let pos = e.base(t).pos;
@@ -712,7 +724,7 @@ impl State {
         for _ in 0..20 {
             if let Some(pos) = pos(&board) {
                 let (dir, species) = (*sample(&DIRECTIONS), *sample(&options));
-                board.add_entity(&Pokemon::new(pos, dir, species), &t);
+                board.add_entity(&Pokemon::new(pos, dir, species, None), &t);
             }
         }
 
