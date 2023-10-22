@@ -90,6 +90,7 @@ struct EntityKnowledge {
     pos: StdCell<Point>,
     glyph: StdCell<Glyph>,
     moved: StdCell<bool>,
+    rival: bool,
     _weak: WeakEntity,
 }
 assert_eq_size!(EntityKnowledge, 32);
@@ -141,6 +142,7 @@ impl Knowledge {
 
             let entity = (|| {
                 let entity = board.get_entity_at(*point)?;
+                let rival = if let ETRef::Trainer(_) = entity.test_ref(t) { true } else { false };
                 let glyph = entity.base(t).glyph;
                 let known = self.entities.entry(entity.id()).and_modify(|x| {
                     let old_pos = x.pos.get();
@@ -161,6 +163,7 @@ impl Knowledge {
                         pos: (*point).into(),
                         glyph: glyph.into(),
                         moved: false.into(),
+                        rival,
                         _weak: entity.into(),
                     };
                     Rc::new(known)
@@ -519,8 +522,8 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
     entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
 }
 
-fn explore_near_point(known: &Knowledge, e: &Entity, t: &Token,
-                      source: Point, age: i32, turns: f64) -> Action {
+fn explore_near(known: &Knowledge, e: &Entity, t: &Token,
+                source: Point, age: i32, turns: f64) -> Action {
     let check = |p: Point| { known.get_status(p).unwrap_or(Status::Free) };
     let done1 = |p: Point| {
         let cell = known.get_cell(p);
@@ -562,7 +565,22 @@ fn wander(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
         wander.time = random::<i32>().rem_euclid(limit);
     }
     if wander.wait { return Action::Idle; }
-    explore_near_point(known, e, t, e.base(t).pos, 9999, WANDER_TURNS)
+    explore_near(known, e, t, e.base(t).pos, 9999, WANDER_TURNS)
+}
+
+fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
+    let mut targets: Vec<(i32, Point)> = vec![];
+    for entity in known.entities.values() {
+        if !entity.rival { continue; }
+        targets.push((entity.age.get(), entity.pos.get()));
+    }
+    if !targets.is_empty() {
+        targets.sort_by_cached_key(|(age, _)| *age);
+        let (age, pos) = targets[0];
+        if age == 0 { return Action::Idle; }
+        return explore_near(known, e, t, pos, age, 1.);
+    }
+    wander(known, e, t)
 }
 
 fn plan(known: &Knowledge, e: &Entity, t: &mut Token, input: &mut Option<Action>) -> Action {
@@ -571,7 +589,7 @@ fn plan(known: &Knowledge, e: &Entity, t: &mut Token, input: &mut Option<Action>
         return input.take().unwrap_or(Action::WaitForInput)
     }
     match e.test_ref(t) {
-        ETRef::Pokemon(x) => wander(known, x, t),
+        ETRef::Pokemon(x) => plan_pokemon(known, x, t),
         ETRef::Trainer(_) => Action::Idle,
     }
 }
