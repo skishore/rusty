@@ -28,8 +28,8 @@ struct Screen {
 
 impl Screen {
     fn new(size: Point) -> Self {
-        let prev = Matrix::new(size, Glyph::wide(' '));
-        let next = Matrix::new(size, Glyph::wide(' '));
+        let prev = Matrix::new(size, Glyph::char(' '));
+        let next = Matrix::new(size, Glyph::char(' '));
         let (x, y) = termion::terminal_size().unwrap();
         let output = io::stdout().into_raw_mode().unwrap();
         Self { extent: Point(x as i32, y as i32), output, next, prev }
@@ -115,7 +115,7 @@ impl Screen {
             Ok(2)
         } else {
             write!(self.output, "{}", char::from_u32(ch.0 as u32).unwrap())?;
-            Ok(if ch.0 <= 0xff { 1 } else { 2 })
+            Ok(if ch.0 <= 0xff00 { 1 } else { 2 })
         }
     }
 
@@ -161,11 +161,12 @@ fn input(key: Key) -> Option<Input> {
 }
 
 fn main() {
-    let size = Point(31, 31);
     let game = State::new();
+    let mut output = Matrix::default();
+    game.render(&mut output);
 
     let mut inputs = termion::async_stdin().keys();
-    let mut screen = Screen::new(Point(2 * size.0, size.1));
+    let mut screen = Screen::new(output.size);
     screen.enter_alt_screen().unwrap();
     screen.write_status_message("<calculating FPS...>").unwrap();
     screen.output.flush().unwrap();

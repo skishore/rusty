@@ -14,11 +14,11 @@ use crate::pathing::{DIRECTIONS, AStar, BFS, BFSResult, Status};
 
 // Constants
 
-const MAP_SIZE: i32 = 100;
+const WORLD_SIZE: i32 = 100;
 const MAX_MEMORY: i32 = 1024;
 
 const FOV_RADIUS_SMALL: i32 = 12;
-const FOV_RADIUS_LARGE: i32 = 15;
+const FOV_RADIUS_LARGE: i32 = 21;
 const VISION_ANGLE: f64 = std::f64::consts::TAU / 3.;
 const VISION_RADIUS: i32 = 3;
 
@@ -687,6 +687,125 @@ fn update_state(state: &mut State) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+// UI
+
+const UI_COL_SPACE: i32 = 2;
+const UI_ROW_SPACE: i32 = 1;
+
+const UI_LOG_SIZE: i32 = 4;
+const UI_MAP_SIZE_X: i32 = 43;
+const UI_MAP_SIZE_Y: i32 = 43;
+const UI_STATUS_SIZE: i32 = 30;
+const UI_COLOR: i32 = 0x430;
+
+#[derive(Clone, Copy)]
+struct Rect { root: Point, size: Point }
+
+struct UI {
+    log: Rect,
+    map: Rect,
+    rivals: Rect,
+    status: Rect,
+    target: Rect,
+    bounds: Point,
+}
+
+impl UI {
+    fn new() -> Self {
+        let ss = UI_STATUS_SIZE;
+        let (x, y) = (UI_MAP_SIZE_X, UI_MAP_SIZE_Y);
+        let (col, row) = (UI_COL_SPACE, UI_ROW_SPACE);
+        let kl = Self::render_key(Some('a')).len() as i32;
+        let w = 2 * x + 2 + 2 * (ss + kl + 2 * col);
+        let h = y + 2 + row + UI_LOG_SIZE + row + 1;
+
+        let status = Rect {
+            root: Point(col, row + 1),
+            size: Point(ss + kl, y - 2 * row),
+        };
+        let map = Rect {
+            root: Point(status.root.0 + status.size.0 + col + 1, 1),
+            size: Point(2 * x, y),
+        };
+        let target = Rect {
+            root: Point(map.root.0 + map.size.0 + col + 1, status.root.1),
+            size: Point(ss + kl, 9),
+        };
+        let rivals_root_y = target.root.1 + target.size.1 + 2 * row + 1;
+        let rivals = Rect {
+            root: Point(target.root.0, rivals_root_y),
+            size: Point(ss + kl, status.root.1 + status.size.1 - rivals_root_y),
+        };
+        let log = Rect {
+            root: Point(0, map.root.1 + map.size.1 + row + 1),
+            size: Point(w, UI_LOG_SIZE),
+        };
+        Self { log, map, rivals, status, target, bounds: Point(w, h) }
+    }
+
+    fn render_bar(&self, buffer: &mut Matrix<Glyph>, width: i32, pos: Point, text: &str) {
+        let shift = 2;
+        let color: Color = UI_COLOR.into();
+        let dashes = Glyph::char('-').fg(color);
+        assert!(shift + text.len() as i32 <= width);
+        for x in 0..shift {
+            buffer.set(pos + Point(x, 0), dashes);
+        }
+        for (i, c) in text.chars().enumerate() {
+            buffer.set(pos + Point(i as i32 + shift, 0), Glyph::char(c).fg(color));
+        }
+        for x in (shift + text.len() as i32)..width {
+            buffer.set(pos + Point(x, 0), dashes);
+        }
+    }
+
+    fn render_box(&self, buffer: &mut Matrix<Glyph>, rect: &Rect) {
+        let Point(w, h) = rect.size;
+        let color: Color = UI_COLOR.into();
+        buffer.set(rect.root + Point(-1, -1), Glyph::char('┌').fg(color));
+        buffer.set(rect.root + Point( w, -1), Glyph::char('┐').fg(color));
+        buffer.set(rect.root + Point(-1,  h), Glyph::char('└').fg(color));
+        buffer.set(rect.root + Point( w,  h), Glyph::char('┘').fg(color));
+
+        let tall = Glyph::char('│').fg(color);
+        let flat = Glyph::char('─').fg(color);
+        for x in 0..w {
+            buffer.set(rect.root + Point(x, -1), flat);
+            buffer.set(rect.root + Point(x,  h), flat);
+        }
+        for y in 0..h {
+            buffer.set(rect.root + Point(-1, y), tall);
+            buffer.set(rect.root + Point( w, y), tall);
+        }
+    }
+
+    fn render_frame(&self, buffer: &mut Matrix<Glyph>) {
+        let ml = self.map.root.0 - 1;
+        let mw = self.map.size.0 + 2;
+        let mh = self.map.size.1 + 2;
+        let tt = self.target.root.1;
+        let th = self.target.size.1;
+        let rt = tt + th + UI_ROW_SPACE;
+        let uw = self.bounds.0;
+        let uh = self.bounds.1;
+
+        self.render_bar(buffer, ml, Point(0, 0), "Party");
+        self.render_bar(buffer, ml, Point(ml + mw, 0), "Target");
+        self.render_bar(buffer, ml, Point(ml + mw, rt), "Wild Pokemon");
+        self.render_bar(buffer, ml, Point(0, mh - 1), "Log");
+        self.render_bar(buffer, ml, Point(ml + mw, mh - 1), "");
+        self.render_bar(buffer, uw, Point(0, uh - 1), "");
+
+        self.render_box(buffer, &self.map);
+    }
+
+    fn render_key(key: Option<char>) -> String {
+        key.map(|x| format!("[{}] ", x)).unwrap_or_default()
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 // State
 
 pub struct State {
@@ -695,11 +814,12 @@ pub struct State {
     inputs: Vec<Input>,
     player: Trainer,
     t: Token,
+    ui: UI,
 }
 
 impl State {
     pub fn new() -> Self {
-        let size = Point(MAP_SIZE, MAP_SIZE);
+        let size = Point(WORLD_SIZE, WORLD_SIZE);
         let mut board = Board::new(size);
         let pos = Point(size.0 / 2, size.1 / 2);
 
@@ -728,7 +848,7 @@ impl State {
             }
         }
 
-        Self { board, input: None, inputs: vec![], player, t }
+        Self { board, input: None, inputs: vec![], player, t, ui: UI::new() }
     }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
@@ -736,13 +856,20 @@ impl State {
     pub fn update(&mut self) { update_state(self); }
 
     pub fn render(&self, buffer: &mut Matrix<Glyph>) {
+        if buffer.data.len() == 0 {
+            let size = self.ui.bounds;
+            let mut overwrite = Matrix::new(size, Glyph::char(' '));
+            std::mem::swap(buffer, &mut overwrite);
+        }
+        self.ui.render_frame(buffer);
+
         let pos = self.player.base(&self.t).pos;
         let known = self.board.get_known(&self.player);
-        let offset = pos - Point(buffer.size.0 / 4, buffer.size.1 / 2);
+        let offset = pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
         let unseen = Glyph::wide(' ');
 
-        for y in 0..buffer.size.1 {
-            for x in 0..(buffer.size.0 / 2) {
+        for y in 0..UI_MAP_SIZE_Y {
+            for x in 0..UI_MAP_SIZE_X {
                 let point = Point(x, y);
                 let glyph = match known.get_cell(point + offset) {
                     Some(cell) => if cell.age > 0 {
@@ -752,7 +879,7 @@ impl State {
                     },
                     None => unseen,
                 };
-                buffer.set(Point(2 * x, y), glyph);
+                buffer.set(self.ui.map.root + Point(2 * x, y), glyph);
             }
         }
     }
