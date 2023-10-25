@@ -53,6 +53,10 @@ pub struct Glyph {
 assert_eq_size!(Glyph, 4);
 
 impl Glyph {
+    pub fn char(ch: char) -> Glyph {
+        Glyph { ch: Char(ch as u16), fg: Color::default(), bg: Color::default() }
+    }
+
     pub fn wide(ch: char) -> Glyph {
         let ch = Char((ch as u16) + (0xff00 - 0x20));
         Glyph { ch, fg: Color::default(), bg: Color::default() }

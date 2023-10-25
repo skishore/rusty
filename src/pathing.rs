@@ -97,7 +97,7 @@ pub fn BFS<F: Fn(Point) -> bool, G: Fn(Point) -> Status>(
 
 //////////////////////////////////////////////////////////////////////////////
 
-// Heap, used for A*
+// Heap, used for Dijkstra and A*
 
 #[derive(Clone, Copy, Eq, PartialEq)] struct AStarHeapIndex(i32);
 #[derive(Clone, Copy, Eq, PartialEq)] struct AStarNodeIndex(i32);
@@ -352,4 +352,50 @@ pub fn AStar<F: Fn(Point) -> Status>(
     }
 
     None
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+// Dijkstra map
+
+#[allow(non_snake_case)]
+pub fn DijkstraMap<F: Fn(Point) -> Status>(
+        limit: i32, check: F, scale: i32, result: &mut HashMap<Point, i32>) {
+    let mut map: HashMap<Point, AStarNodeIndex> = HashMap::default();
+    let mut heap = AStarHeap::default();
+
+    for (pos, val) in result.iter() {
+        let node = AStarNode::new(*pos, SOURCE_NODE, 0, *val);
+        map.insert(*pos, heap.push(node));
+    }
+
+    for _ in 0..limit {
+        if heap.is_empty() { break; }
+        let prev = heap.extract_min();
+        let prev_pos = heap.get_node(prev).pos;
+        let prev_val = heap.get_node(prev).score;
+        result.insert(prev_pos, prev_val);
+
+        for dir in &DIRECTIONS {
+            let next = prev_pos + *dir;
+            if check(next) == Status::Blocked { continue; }
+
+            let val = prev_val + scale;
+            map.entry(next).and_modify(|x| {
+                let existing = heap.mut_node(*x);
+                if existing.index != NOT_IN_HEAP && existing.score > val {
+                    existing.score = val;
+                    heap.heapify(*x);
+                }
+            }).or_insert_with(|| {
+                heap.push(AStarNode::new(next, SOURCE_NODE, 0, val))
+            });
+        }
+    }
+
+    for node in &heap.heap {
+        let prev_pos = heap.get_node(*node).pos;
+        let prev_val = heap.get_node(*node).score;
+        result.insert(prev_pos, prev_val);
+    }
 }

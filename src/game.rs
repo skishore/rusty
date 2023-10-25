@@ -7,14 +7,15 @@ use rand::random;
 
 use crate::assert_eq_size;
 use crate::base::{Color, FOV, Glyph, HashMap, Matrix, Point};
-use crate::entity::{Entity, ETRef, Token, Pokemon, Trainer, WeakEntity};
-use crate::pathing::{DIRECTIONS, AStar, BFS, BFSResult, Status};
+use crate::entity::{AIDebug, Pokemon, PokemonSpeciesData};
+use crate::entity::{Entity, ETRef, Token, Trainer, WeakEntity};
+use crate::pathing::{DIRECTIONS, AStar, BFS, BFSResult, DijkstraMap, Status};
 
 //////////////////////////////////////////////////////////////////////////////
 
 // Constants
 
-const MAP_SIZE: i32 = 100;
+const MAP_SIZE: i32 = 32;
 const MAX_MEMORY: i32 = 1024;
 
 const FOV_RADIUS_SMALL: i32 = 12;
@@ -135,7 +136,7 @@ impl Knowledge {
         let my_entity = e.base(t);
         self.forget(my_entity.player);
         let offset = vision.offset - my_entity.pos;
-        let my_trainer = trainer(e, t);
+        let my_species = species(e, t);
 
         for point in &vision.cells_seen {
             let visibility = vision.visibility.get(*point + offset);
@@ -143,7 +144,8 @@ impl Knowledge {
 
             let entity = (|| {
                 let entity = board.get_entity_at(*point)?;
-                let rival = !trainers_match(&my_trainer, &trainer(entity, t));
+                let species = species(entity, t);
+                let rival = species.is_some() && !species_match(&my_species, &species);
                 let glyph = entity.base(t).glyph;
                 let known = self.entities.entry(entity.id()).and_modify(|x| {
                     let old_pos = x.pos.get();
@@ -484,6 +486,7 @@ pub struct MoveData { dir: Point, turns: f64 }
 
 pub enum Action {
     Idle,
+    Look(Point),
     Move(MoveData),
     WaitForInput,
 }
@@ -522,6 +525,19 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
     entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
 }
 
+fn species(e: &Entity, t: &Token) -> Option<&'static PokemonSpeciesData> {
+    match e.test_ref(t) {
+        ETRef::Pokemon(x) => Some(x.data(t).individual.species),
+        ETRef::Trainer(_) => None,
+    }
+}
+
+fn species_match(a: &Option<&'static PokemonSpeciesData>,
+                 b: &Option<&'static PokemonSpeciesData>) -> bool {
+    a.map(|x| x as *const PokemonSpeciesData) ==
+    b.map(|x| x as *const PokemonSpeciesData)
+}
+
 fn trainer(e: &Entity, t: &Token) -> Option<Trainer> {
     match e.test_ref(t) {
         ETRef::Pokemon(x) => x.data(t).individual.trainer.upgrade(),
@@ -534,7 +550,7 @@ fn trainers_match(a: &Option<Trainer>, b: &Option<Trainer>) -> bool {
     a.is_none() && b.is_none()
 }
 
-fn explore_near(known: &Knowledge, e: &Entity, t: &Token,
+fn explore_near(known: &Knowledge, e: &Entity, t: &mut Token,
                 source: Point, age: i32, turns: f64) -> Action {
     let pos = e.base(t).pos;
     let check = |p: Point| {
@@ -561,6 +577,10 @@ fn explore_near(known: &Knowledge, e: &Entity, t: &Token,
             targets.sort_by_cached_key(|x| (*x - pos).len_l2_squared());
             targets[0]
         })();
+        e.base_mut(t).debug.target = Some(target);
+        let target_age = known.get_cell(target).map(|x| x.age);
+        e.base_mut(t).debug.verbose =
+            format!("min_age: {}, target_age: {:?}", age, target_age);
         let path = AStar(pos, target, ASTAR_LIMIT_WANDER, check).unwrap_or(vec![]);
         if path.is_empty() { return Some(*sample(&dirs)); }
         Some(path[0] - pos)
@@ -568,6 +588,42 @@ fn explore_near(known: &Knowledge, e: &Entity, t: &Token,
 
     let dir = dir.unwrap_or_else(|| *sample(&DIRECTIONS));
     Action::Move(MoveData { dir, turns })
+}
+
+fn flee_from(known: &Knowledge, e: &Entity, t: &mut Token, source: Point) -> Action {
+    let mut map: HashMap<Point, i32> = HashMap::default();
+    map.insert(source, 0);
+
+    let limit = 4096;
+
+    let check = |p: Point| { known.get_status(p).unwrap_or(Status::Blocked) };
+    DijkstraMap(limit, check, 1, &mut map);
+
+    for (pos, val) in map.iter_mut() {
+        let frontier = DIRECTIONS.iter().any(|x| !known.remembers(*pos + *x));
+        if frontier { *val += FOV_RADIUS_SMALL; }
+        *val *= -10;
+    }
+    DijkstraMap(limit, check, 1, &mut map);
+
+    let pos = e.base(t).pos;
+    let lookup = |x: &Point| map.get(x).map(|x| *x).unwrap_or(-9999);
+    let mut best_steps = vec![Point::default()];
+    let mut best_score = lookup(&pos);
+
+    for dir in &DIRECTIONS {
+        let option = pos + *dir;
+        if check(option) != Status::Free { continue; }
+        let score = lookup(&option);
+        if score > best_score { continue; }
+        if score < best_score { best_steps.clear(); }
+        best_steps.push(*dir);
+        best_score = score;
+    }
+
+    e.base_mut(t).debug.map = map;
+
+    Action::Move(MoveData { dir: *sample(&best_steps), turns: 1. })
 }
 
 fn wander(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
@@ -584,6 +640,8 @@ fn wander(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
 }
 
 fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
+    e.base_mut(t).debug = AIDebug::default();
+    let prey = e.data(t).individual.species.name == "Pidgey";
     let mut targets: Vec<(i32, Point)> = vec![];
     for entity in known.entities.values() {
         if !entity.rival { continue; }
@@ -592,7 +650,8 @@ fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
     if !targets.is_empty() {
         targets.sort_by_cached_key(|(age, _)| *age);
         let (age, pos) = targets[0];
-        if age == 0 { return Action::Idle; }
+        if prey { return flee_from(known, e, t, pos); }
+        if age == 0 { return Action::Look(pos - e.base(t).pos); }
         return explore_near(known, e, t, pos, age, 1.);
     }
     wander(known, e, t)
@@ -613,8 +672,14 @@ fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
     match action {
         Action::Idle => ActionResult::success(),
         Action::WaitForInput => ActionResult::failure(),
+        Action::Look(dir) => {
+            e.base_mut(&mut state.t).dir = dir;
+            ActionResult::success()
+        }
         Action::Move(MoveData { dir ,turns }) => {
-            if dir == Point::default() { return ActionResult::success_turns(turns); }
+            if dir == Point::default() {
+                return ActionResult::success_turns(turns);
+            }
             e.base_mut(&mut state.t).dir = dir;
             let target = e.base(&state.t).pos + dir;
             if state.board.get_status(target) == Status::Free {
@@ -731,9 +796,9 @@ impl State {
             None
         };
         let options = ["Pidgey", "Ratatta"];
-        for _ in 0..20 {
+        for i in 0..2 {
             if let Some(pos) = pos(&board) {
-                let (dir, species) = (*sample(&DIRECTIONS), *sample(&options));
+                let (dir, species) = (*sample(&DIRECTIONS), options[i]);
                 board.add_entity(&Pokemon::new(pos, dir, species, None), &t);
             }
         }
@@ -750,6 +815,7 @@ impl State {
         let known = self.board.get_known(entity);
         let offset = Point(0, 0);
         let unseen = Glyph::wide(' ');
+        let debug = &entity.base(&self.t).debug;
 
         for y in 0..buffer.size.1 {
             for x in 0..(buffer.size.0 / 2) {
@@ -763,7 +829,22 @@ impl State {
                     None => unseen,
                 };
                 buffer.set(Point(2 * x, y), glyph);
+
+                if let Some(val) = debug.map.get(&point) {
+                    buffer.set(Point(2 * x, y),
+                               Glyph::wide(std::char::from_digit(
+                                       val.rem_euclid(10) as u32, 10).unwrap()));
+                }
             }
+        }
+        if let Some(mut pos) = debug.target {
+            pos.0 *= 2;
+            buffer.set(pos, buffer.get(pos).fg(Color::black()).bg(0x400));
+        }
+        let chars = debug.verbose.chars().collect::<Vec<_>>();
+        for x in 0..buffer.size.0 {
+            buffer.set(Point(x, 0),
+                       Glyph::char(*chars.get(x as usize).unwrap_or(&' ')));
         }
         for entity in known.entities.values() {
             let Point(x, y) = entity.pos.get();

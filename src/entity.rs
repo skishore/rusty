@@ -30,6 +30,13 @@ lazy_static! {
 
 // Actual data definitions:
 
+#[derive(Default)]
+pub struct AIDebug {
+    pub map: HashMap<Point, i32>,
+    pub target: Option<Point>,
+    pub verbose: String,
+}
+
 pub struct WanderState {
     pub time: i32,
     pub wait: bool,
@@ -44,6 +51,8 @@ pub struct EntityData {
     pub speed: f64,
     pub dir: Point,
     pub pos: Point,
+
+    pub debug: AIDebug,
 }
 
 pub struct PokemonSpeciesData {
@@ -92,6 +101,8 @@ fn pokemon(pos: Point, dir: Point, species: &str, trainer: Option<&Trainer>) -> 
         speed: species.speed,
         dir,
         pos,
+
+        debug: AIDebug::default(),
     };
     EntityRepr { base, data: EntityType::Pokemon(data) }
 }
@@ -106,6 +117,8 @@ fn trainer(pos: Point, player: bool) -> EntityRepr {
         speed: TRAINER_SPEED,
         dir: Point(1, 0),
         pos,
+
+        debug: AIDebug::default(),
     };
     EntityRepr { base, data: EntityType::Trainer(TrainerData {}) }
 }
