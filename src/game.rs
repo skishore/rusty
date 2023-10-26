@@ -524,7 +524,11 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
 
 fn explore_near(known: &Knowledge, e: &Entity, t: &Token,
                 source: Point, age: i32, turns: f64) -> Action {
-    let check = |p: Point| { known.get_status(p).unwrap_or(Status::Free) };
+    let pos = e.base(t).pos;
+    let check = |p: Point| {
+        if p == pos { return Status::Free; }
+        known.get_status(p).unwrap_or(Status::Free)
+    };
     let done1 = |p: Point| {
         let cell = known.get_cell(p);
         if cell.map(|x| x.age <= age).unwrap_or(false) { return false; }
@@ -538,7 +542,6 @@ fn explore_near(known: &Knowledge, e: &Entity, t: &Token,
                  BFS(source, done1, BFS_LIMIT_WANDER, check));
 
     let dir = (|| {
-        let pos = e.base(t).pos;
         let BFSResult { dirs, mut targets } = result?;
         if dirs.is_empty() || targets.is_empty() { return None; }
         let target = (|| {
