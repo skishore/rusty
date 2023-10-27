@@ -28,19 +28,52 @@ lazy_static! {
 
 //////////////////////////////////////////////////////////////////////////////
 
-// Actual data definitions:
+// Pathing state definitions:
 
-#[derive(Default)]
-pub struct AIDebug {
-    pub map: HashMap<Point, i32>,
-    pub target: Option<Point>,
-    pub verbose: String,
+#[derive(Debug)]
+pub struct Fight {
+    pub age: i32,
+    pub target: Point,
 }
 
-pub struct WanderState {
+#[derive(Debug)]
+pub struct Flight {
+    pub age: i32,
+    pub switch: i32,
+    pub target: Point,
+}
+
+#[derive(Debug)]
+pub struct Wander {
     pub time: i32,
-    pub wait: bool,
 }
+
+#[derive(Debug)]
+pub struct Assess {
+    pub switch: i32,
+    pub target: Point,
+    pub time: i32,
+}
+
+#[derive(Debug)]
+pub enum AIState {
+    Fight(Fight),
+    Flight(Flight),
+    Wander(Wander),
+    Assess(Assess),
+}
+
+impl Default for Wander {
+    fn default() -> Self { Self { time: 0 } }
+}
+
+impl Default for AIState {
+    fn default() -> Self { Self::Wander(Wander::default()) }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+// Entity data definitions:
 
 pub struct EntityData {
     pub player: bool,
@@ -51,8 +84,6 @@ pub struct EntityData {
     pub speed: f64,
     pub dir: Point,
     pub pos: Point,
-
-    pub debug: AIDebug,
 }
 
 pub struct PokemonSpeciesData {
@@ -70,8 +101,8 @@ pub struct PokemonIndividualData {
 }
 
 pub struct PokemonData {
+    pub ai: AIState,
     pub individual: Box<PokemonIndividualData>,
-    pub wander: WanderState,
 }
 
 pub struct TrainerData {}
@@ -89,8 +120,8 @@ fn pokemon(pos: Point, dir: Point, species: &str, trainer: Option<&Trainer>) -> 
         max_hp: species.hp,
     };
     let data = PokemonData {
+        ai: AIState::default(),
         individual: Box::new(individual),
-        wander: WanderState { time: 0, wait: false },
     };
     let base = EntityData {
         player: false,
@@ -101,8 +132,6 @@ fn pokemon(pos: Point, dir: Point, species: &str, trainer: Option<&Trainer>) -> 
         speed: species.speed,
         dir,
         pos,
-
-        debug: AIDebug::default(),
     };
     EntityRepr { base, data: EntityType::Pokemon(data) }
 }
@@ -117,8 +146,6 @@ fn trainer(pos: Point, player: bool) -> EntityRepr {
         speed: TRAINER_SPEED,
         dir: Point(1, 0),
         pos,
-
-        debug: AIDebug::default(),
     };
     EntityRepr { base, data: EntityType::Trainer(TrainerData {}) }
 }

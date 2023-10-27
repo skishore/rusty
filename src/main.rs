@@ -1,3 +1,4 @@
+#![feature(let_chains)]
 #![feature(test)]
 
 mod base;
