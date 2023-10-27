@@ -1,5 +1,6 @@
 use std::cmp::{max, min};
 use std::ops::{Deref, DerefMut};
+use std::f64::consts::TAU;
 use std::rc::Rc;
 
 use lazy_static::lazy_static;
@@ -7,20 +8,29 @@ use rand::random;
 
 use crate::assert_eq_size;
 use crate::base::{Color, FOV, Glyph, HashMap, Matrix, Point};
+use crate::entity::{AIState, Assess, Fight, Flight, Wander};
 use crate::entity::{AIDebug, Pokemon, PokemonSpeciesData};
 use crate::entity::{Entity, ETRef, Token, Trainer, WeakEntity};
-use crate::pathing::{DIRECTIONS, AStar, BFS, BFSResult, DijkstraMap, Status};
+use crate::pathing::{AStar, DijkstraMap, DijkstraMode};
+use crate::pathing::{DIRECTIONS, BFS, BFSResult, Status};
 
 //////////////////////////////////////////////////////////////////////////////
 
 // Constants
 
-const MAP_SIZE: i32 = 32;
+const MAP_SIZE: i32 = 100;
 const MAX_MEMORY: i32 = 1024;
+
+const ASSESS_TIME: i32 = 17;
+const ASSESS_ANGLE: f64 = TAU / 3.;
+
+const MIN_FLIGHT_TIME: i32 = 8;
+const MAX_FLIGHT_TIME: i32 = 64;
+const MAX_FOLLOW_TIME: i32 = 64;
 
 const FOV_RADIUS_SMALL: i32 = 12;
 const FOV_RADIUS_LARGE: i32 = 15;
-const VISION_ANGLE: f64 = std::f64::consts::TAU / 3.;
+const VISION_ANGLE: f64 = TAU / 3.;
 const VISION_RADIUS: i32 = 3;
 
 const MOVE_TIMER: i32 = 960;
@@ -578,9 +588,6 @@ fn explore_near(known: &Knowledge, e: &Entity, t: &mut Token,
             targets[0]
         })();
         e.base_mut(t).debug.target = Some(target);
-        let target_age = known.get_cell(target).map(|x| x.age);
-        e.base_mut(t).debug.verbose =
-            format!("min_age: {}, target_age: {:?}", age, target_age);
         let path = AStar(pos, target, ASTAR_LIMIT_WANDER, check).unwrap_or(vec![]);
         if path.is_empty() { return Some(*sample(&dirs)); }
         Some(path[0] - pos)
@@ -590,23 +597,48 @@ fn explore_near(known: &Knowledge, e: &Entity, t: &mut Token,
     Action::Move(MoveData { dir, turns })
 }
 
-fn flee_from(known: &Knowledge, e: &Entity, t: &mut Token, source: Point) -> Action {
+fn assess(_: &Knowledge, e: &Entity, t: &Token, s: &mut Assess) -> Action {
+    s.time -= 1;
+    let a = 1 * ASSESS_TIME / 4;
+    let b = 2 * ASSESS_TIME / 4;
+    let c = 3 * ASSESS_TIME / 4;
+    let depth = if s.time < a {
+        -s.time
+    } else if s.time < c {
+        s.time - 2 * a
+    } else {
+        -s.time + 2 * c - 2 * a
+    };
+    let scale = 1000;
+    let angle = ASSESS_ANGLE * depth as f64 / b as f64;
+    let (sin, cos) = (angle.sin(), angle.cos());
+    let Point(dx, dy) = s.target - e.base(t).pos;
+    let rx = (cos * (scale * dx) as f64) + (sin * (scale * dy) as f64);
+    let ry = (cos * (scale * dy) as f64) - (sin * (scale * dx) as f64);
+    Action::Look(Point(rx as i32, ry as i32))
+}
+
+fn flight(known: &Knowledge, e: &Entity, t: &mut Token,
+          source: Point) -> Option<Action> {
     let mut map: HashMap<Point, i32> = HashMap::default();
     map.insert(source, 0);
 
-    let limit = 4096;
+    let limit = 1024;
+    let pos = e.base(t).pos;
 
-    let check = |p: Point| { known.get_status(p).unwrap_or(Status::Blocked) };
-    DijkstraMap(limit, check, 1, &mut map);
+    let check = |p: Point| {
+        if p == pos { return Status::Free; }
+        known.get_status(p).unwrap_or(Status::Blocked)
+    };
+    DijkstraMap(DijkstraMode::Expand(limit), check, 1, &mut map);
 
     for (pos, val) in map.iter_mut() {
         let frontier = DIRECTIONS.iter().any(|x| !known.remembers(*pos + *x));
         if frontier { *val += FOV_RADIUS_SMALL; }
         *val *= -10;
     }
-    DijkstraMap(limit, check, 1, &mut map);
+    DijkstraMap(DijkstraMode::Update, check, 1, &mut map);
 
-    let pos = e.base(t).pos;
     let lookup = |x: &Point| map.get(x).map(|x| *x).unwrap_or(-9999);
     let mut best_steps = vec![Point::default()];
     let mut best_score = lookup(&pos);
@@ -623,24 +655,15 @@ fn flee_from(known: &Knowledge, e: &Entity, t: &mut Token, source: Point) -> Act
 
     e.base_mut(t).debug.map = map;
 
-    Action::Move(MoveData { dir: *sample(&best_steps), turns: 1. })
-}
-
-fn wander(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
-    let wander = &mut e.data_mut(t).wander;
-    wander.time = wander.time - 1;
-    if wander.time < 0 {
-        wander.wait = !wander.wait;
-        let multiplier = if wander.wait { WANDER_TURNS } else { 1. };
-        let limit = max(1, (16. * multiplier).round() as i32);
-        wander.time = random::<i32>().rem_euclid(limit);
-    }
-    if wander.wait { return Action::Idle; }
-    explore_near(known, e, t, e.base(t).pos, 9999, WANDER_TURNS)
+    if best_steps[0] == Point::default() { return None; }
+    Some(Action::Move(MoveData { dir: *sample(&best_steps), turns: 1.5 }))
 }
 
 fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
     e.base_mut(t).debug = AIDebug::default();
+    let mut ai = AIState::default();
+    std::mem::swap(&mut ai, &mut e.data_mut(t).ai);
+
     let prey = e.data(t).individual.species.name == "Pidgey";
     let mut targets: Vec<(i32, Point)> = vec![];
     for entity in known.entities.values() {
@@ -649,12 +672,64 @@ fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
     }
     if !targets.is_empty() {
         targets.sort_by_cached_key(|(age, _)| *age);
-        let (age, pos) = targets[0];
-        if prey { return flee_from(known, e, t, pos); }
-        if age == 0 { return Action::Look(pos - e.base(t).pos); }
-        return explore_near(known, e, t, pos, age, 1.);
+        let (age, target) = targets[0];
+
+        if prey {
+            let switch = match &ai {
+                AIState::Flight(x) => x.switch,
+                AIState::Assess(x) => x.switch,
+                _ => MIN_FLIGHT_TIME,
+            };
+            let flight = matches!(ai, AIState::Flight(_));
+            if age >= switch && flight {
+                ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME });
+            } else if age < switch && !flight {
+                let switch = min(max(2 * switch, MIN_FLIGHT_TIME), MAX_FLIGHT_TIME);
+                ai = AIState::Flight(Flight { age, switch, target });
+            }
+            if let AIState::Flight(x) = &mut ai {
+                (x.age, x.target) = (age, target);
+            }
+        } else if age < MAX_FOLLOW_TIME || matches!(ai, AIState::Fight(_)) {
+            ai = AIState::Fight(Fight { age, target });
+        }
     }
-    wander(known, e, t)
+    if let AIState::Fight(x) = &ai && x.age >= MAX_FOLLOW_TIME {
+        let (switch, target) = (MIN_FLIGHT_TIME, x.target);
+        ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME })
+    }
+    if let AIState::Wander(x) = &ai && x.time <= 0 {
+        let (switch, target) = (MIN_FLIGHT_TIME, e.base(t).pos + e.base(t).dir);
+        ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME })
+    }
+    if let AIState::Assess(x) = &ai && x.time <= 0 {
+        ai = AIState::Wander(Wander { time: random::<i32>().rem_euclid(16) });
+    }
+
+    let mut replacement = None;
+    let action = match &mut ai {
+        AIState::Fight(x) => if x.age == 0 {
+            Action::Look(x.target - e.base(t).pos)
+        } else {
+            explore_near(known, e, t, x.target, x.age, 1.)
+        }
+        AIState::Flight(x) => flight(known, e, t, x.target).unwrap_or_else(||{
+            let (target, time) = (x.target, ASSESS_TIME);
+            let mut x = Assess { switch: min(x.age + 1, x.switch), target, time };
+            let result = assess(known, e, t, &mut x);
+            replacement = Some(AIState::Assess(x));
+            result
+        }),
+        AIState::Wander(x) => {
+            x.time -= 1;
+            explore_near(known, e, t, e.base(t).pos, 9999, WANDER_TURNS)
+        }
+        AIState::Assess(ref mut x) => assess(known, e, t, x),
+    };
+    if let Some(x) = replacement { ai = x; }
+    e.base_mut(t).debug.verbose = format!("{:?}", ai);
+    std::mem::swap(&mut ai, &mut e.data_mut(t).ai);
+    action
 }
 
 fn plan(known: &Knowledge, e: &Entity, t: &mut Token, input: &mut Option<Action>) -> Action {
@@ -754,8 +829,6 @@ fn update_state(state: &mut State) {
 
     if update {
         state.board.update_known(&state.player, &state.t);
-        let entity = state.board.entities[state.index].clone();
-        state.board.update_known(&entity, &state.t);
     }
 }
 
@@ -796,9 +869,10 @@ impl State {
             None
         };
         let options = ["Pidgey", "Ratatta"];
-        for i in 0..2 {
+        for i in 0..20 {
             if let Some(pos) = pos(&board) {
-                let (dir, species) = (*sample(&DIRECTIONS), options[i]);
+                let index = if i % 4 == 0 { 1 } else { 0 };
+                let (dir, species) = (*sample(&DIRECTIONS), options[index]);
                 board.add_entity(&Pokemon::new(pos, dir, species, None), &t);
             }
         }
@@ -826,7 +900,11 @@ impl State {
                     } else {
                         cell.entity.as_ref().map(|x| x.glyph.get()).unwrap_or(cell.tile.glyph)
                     },
-                    None => unseen,
+                    None => if self.index == 0 {
+                        self.board.map.get(point + offset).glyph.fg(Color::gray())
+                    } else {
+                        unseen
+                    }
                 };
                 buffer.set(Point(2 * x, y), glyph);
 
@@ -845,6 +923,11 @@ impl State {
         for x in 0..buffer.size.0 {
             buffer.set(Point(x, 0),
                        Glyph::char(*chars.get(x as usize).unwrap_or(&' ')));
+        }
+        for entity in &self.board.entities {
+            let glyph = entity.base(&self.t).glyph;
+            let Point(x, y) = entity.base(&self.t).pos;
+            buffer.set(Point(2 * x, y), glyph);
         }
         for entity in known.entities.values() {
             let Point(x, y) = entity.pos.get();

@@ -358,9 +358,11 @@ pub fn AStar<F: Fn(Point) -> Status>(
 
 // Dijkstra map
 
+pub enum DijkstraMode { Expand(i32), Update }
+
 #[allow(non_snake_case)]
 pub fn DijkstraMap<F: Fn(Point) -> Status>(
-        limit: i32, check: F, scale: i32, result: &mut HashMap<Point, i32>) {
+        mode: DijkstraMode, check: F, scale: i32, result: &mut HashMap<Point, i32>) {
     let mut map: HashMap<Point, AStarNodeIndex> = HashMap::default();
     let mut heap = AStarHeap::default();
 
@@ -368,6 +370,11 @@ pub fn DijkstraMap<F: Fn(Point) -> Status>(
         let node = AStarNode::new(*pos, SOURCE_NODE, 0, *val);
         map.insert(*pos, heap.push(node));
     }
+
+    let (expand, limit) = match mode {
+        DijkstraMode::Expand(x) => (true, x),
+        DijkstraMode::Update => (false, result.len() as i32),
+    };
 
     for _ in 0..limit {
         if heap.is_empty() { break; }
@@ -378,18 +385,21 @@ pub fn DijkstraMap<F: Fn(Point) -> Status>(
 
         for dir in &DIRECTIONS {
             let next = prev_pos + *dir;
-            if check(next) == Status::Blocked { continue; }
+            if check(next) != Status::Free { continue; }
 
             let val = prev_val + scale;
-            map.entry(next).and_modify(|x| {
+            let entry = map.entry(next).and_modify(|x| {
                 let existing = heap.mut_node(*x);
                 if existing.index != NOT_IN_HEAP && existing.score > val {
                     existing.score = val;
                     heap.heapify(*x);
                 }
-            }).or_insert_with(|| {
-                heap.push(AStarNode::new(next, SOURCE_NODE, 0, val))
             });
+            if expand {
+                entry.or_insert_with(|| {
+                    heap.push(AStarNode::new(next, SOURCE_NODE, 0, val))
+                });
+            }
         }
     }
 

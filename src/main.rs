@@ -1,3 +1,4 @@
+#![feature(let_chains)]
 #![feature(test)]
 
 mod base;
@@ -161,7 +162,7 @@ fn input(key: Key) -> Option<Input> {
 }
 
 fn main() {
-    let size = Point(32, 32);
+    let size = Point(100, 100);
     let game = State::new();
 
     let mut inputs = termion::async_stdin().keys();
