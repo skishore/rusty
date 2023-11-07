@@ -189,6 +189,8 @@ impl From<&Entity> for WeakEntity {
 }
 
 impl WeakEntity {
+    pub fn id(&self) -> usize { Weak::as_ptr(&self.0) as usize }
+
     pub fn upgrade(&self) -> Option<Entity> { self.0.upgrade().map(|x| Entity(x)) }
 }
 
