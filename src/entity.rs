@@ -164,12 +164,7 @@ enum EntityType {
     Trainer(TrainerData),
 }
 
-pub enum ET {
-    Pokemon(Pokemon),
-    Trainer(Trainer),
-}
-
-pub enum ETRef<'a> {
+pub enum ET<'a> {
     Pokemon(&'a Pokemon),
     Trainer(&'a Trainer),
 }
@@ -207,18 +202,11 @@ impl Entity {
 
     pub fn same(&self, other: &Entity) -> bool { Rc::ptr_eq(&self.0, &other.0) }
 
-    pub fn test(self, t: &Token) -> ET {
-        match &self.0.get(t).data {
-            EntityType::Pokemon(_) => ET::Pokemon(Pokemon(self)),
-            EntityType::Trainer(_) => ET::Trainer(Trainer(self)),
-        }
-    }
-
-    pub fn test_ref<'a>(&'a self, t: &Token) -> ETRef<'a> {
+    pub fn test<'a>(&'a self, t: &Token) -> ET<'a> {
         let p = self as *const Entity;
         match &self.0.get(t).data {
-            EntityType::Pokemon(_) => ETRef::Pokemon(unsafe { &*(p as *const Pokemon) }),
-            EntityType::Trainer(_) => ETRef::Trainer(unsafe { &*(p as *const Trainer) }),
+            EntityType::Pokemon(_) => ET::Pokemon(unsafe { &*(p as *const Pokemon) }),
+            EntityType::Trainer(_) => ET::Trainer(unsafe { &*(p as *const Trainer) }),
         }
     }
 }

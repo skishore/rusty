@@ -9,7 +9,7 @@ use crate::assert_eq_size;
 use crate::base::{Color, FOV, Glyph, HashMap, Matrix, Point};
 use crate::entity::{AIState, Assess, Fight, Flight, Wander};
 use crate::entity::{Pokemon, PokemonSpeciesData};
-use crate::entity::{Entity, ETRef, Token, Trainer, WeakEntity};
+use crate::entity::{Entity, ET, Token, Trainer, WeakEntity};
 use crate::pathing::{AStar, DijkstraMap, DijkstraMode};
 use crate::pathing::{DIRECTIONS, BFS, BFSResult, Status};
 
@@ -107,15 +107,19 @@ assert_eq_size!(EntityKnowledge, 32);
 
 #[derive(Default)]
 struct Knowledge {
-    map: HashMap<Point, CellKnowledge>,
-    entity_by_id: HashMap<usize, EntityIndex>,
+    _map: HashMap<Point, CellKnowledge>,
+    _entity_by_id: HashMap<usize, EntityIndex>,
     entities: Vec<EntityKnowledge>,
 }
 
 impl Knowledge {
     // Reads
 
-    fn get_cell(&self, p: Point) -> Option<&CellKnowledge> { self.map.get(&p) }
+    fn get_cell(&self, p: Point) -> Option<&CellKnowledge> { self._map.get(&p) }
+
+    fn get_entity(&self, cell: &CellKnowledge) -> Option<&EntityKnowledge> {
+        cell.eid.map(|eid| self._entity_raw(eid))
+    }
 
     fn get_status(&self, p: Point) -> Option<Status> {
         self.get_cell(p).map(|x| {
@@ -129,7 +133,7 @@ impl Knowledge {
     }
 
     fn remembers(&self, p: Point) -> bool {
-        self.map.contains_key(&p)
+        self._map.contains_key(&p)
     }
 
     fn blocked(&self, p: Point) -> bool {
@@ -140,11 +144,11 @@ impl Knowledge {
         self.get_cell(p).map(|x| !x.tile.blocked()).unwrap_or(false)
     }
 
-    fn entity(&self, eid: EntityIndex) -> &EntityKnowledge {
+    fn _entity_raw(&self, eid: EntityIndex) -> &EntityKnowledge {
         &self.entities[eid.0 as usize]
     }
 
-    fn entity_mut(&mut self, eid: EntityIndex) -> &mut EntityKnowledge {
+    fn _entity_mut(&mut self, eid: EntityIndex) -> &mut EntityKnowledge {
         &mut self.entities[eid.0 as usize]
     }
 
@@ -152,7 +156,7 @@ impl Knowledge {
 
     fn update(&mut self, board: &BaseBoard, e: &Entity, t: &Token, vision: &Vision) {
         let my_entity = e.base(t);
-        self.forget(my_entity.player);
+        self._forget(my_entity.player);
         let offset = vision.offset - my_entity.pos;
         let my_species = species(e, t);
 
@@ -167,10 +171,10 @@ impl Knowledge {
                 let (age, pos, moved) = (0, *point, false);
                 let rival = species.is_some() && !species_match(&my_species, &species);
 
-                let eid = *self.entity_by_id.entry(entity.id()).and_modify(|x| {
+                let eid = *self._entity_by_id.entry(entity.id()).and_modify(|x| {
                     let existing = &mut self.entities[x.0 as usize];
                     if !existing.moved && existing.pos != *point {
-                        self.map.entry(existing.pos).and_modify(|y| {
+                        self._map.entry(existing.pos).and_modify(|y| {
                             assert!(y.eid == Some(*x));
                             y.eid = None;
                         });
@@ -191,28 +195,28 @@ impl Knowledge {
 
             let tile = board.map.get(*point);
             let cell = CellKnowledge { age: 0, eid, tile, visibility };
-            let prev = self.map.insert(*point, cell);
+            let prev = self._map.insert(*point, cell);
             if let Some(x) = prev && x.eid != eid && let Some(other) = x.eid {
-                self.mark_entity_moved(other, *point);
+                self._mark_entity_moved(other, *point);
             }
         }
     }
 
-    fn forget(&mut self, player: bool) {
+    fn _forget(&mut self, player: bool) {
         if player {
-            self.map.iter_mut().for_each(|x| x.1.age = 1);
+            self._map.iter_mut().for_each(|x| x.1.age = 1);
             self.entities.iter_mut().for_each(|x| x.age = 1);
             return;
         }
 
         let mut removed: Vec<(Point, Option<EntityIndex>)> = vec![];
-        for (key, val) in self.map.iter_mut() {
+        for (key, val) in self._map.iter_mut() {
             val.age += 1;
             if val.age >= MAX_MEMORY { removed.push((*key, val.eid)); }
         }
         removed.iter().for_each(|x| {
-            self.map.remove(&x.0);
-            if let Some(eid) = x.1 { self.mark_entity_moved(eid, x.0); }
+            self._map.remove(&x.0);
+            if let Some(eid) = x.1 { self._mark_entity_moved(eid, x.0); }
         });
 
         let mut removed: Vec<EntityIndex> = vec![];
@@ -220,35 +224,35 @@ impl Knowledge {
             val.age += 1;
             if val.age >= MAX_MEMORY { removed.push(EntityIndex(i as i32)); }
         }
-        removed.iter().rev().for_each(|x| { self.remove_entity(*x); });
+        removed.iter().rev().for_each(|x| { self._remove_entity(*x); });
     }
 
-    fn mark_entity_moved(&mut self, eid: EntityIndex, pos: Point) {
-        let entity = self.entity_mut(eid);
+    fn _mark_entity_moved(&mut self, eid: EntityIndex, pos: Point) {
+        let entity = self._entity_mut(eid);
         assert!(entity.pos == pos);
         entity.moved = true;
     }
 
-    fn remove_entity(&mut self, eid: EntityIndex) {
+    fn _remove_entity(&mut self, eid: EntityIndex) {
         let popped = self.entities.pop().unwrap();
         let popped_eid = EntityIndex(self.entities.len() as i32);
         let swap = eid != popped_eid;
 
         if !popped.moved {
-            let cell = self.map.get_mut(&popped.pos).unwrap();
+            let cell = self._map.get_mut(&popped.pos).unwrap();
             assert!(cell.eid == Some(popped_eid));
             cell.eid = if swap { Some(eid) } else { None };
         }
 
         let deleted = if swap {
-            self.entity_by_id.remove(&self.entity(eid).weak.id());
-            self.entity_by_id.insert(popped.weak.id(), eid)
+            self._entity_by_id.remove(&self._entity_raw(eid).weak.id());
+            self._entity_by_id.insert(popped.weak.id(), eid)
         } else {
-            self.entity_by_id.remove(&popped.weak.id())
+            self._entity_by_id.remove(&popped.weak.id())
         };
         assert!(deleted == Some(popped_eid));
 
-        if swap { *self.entity_mut(eid) = popped; }
+        if swap { *self._entity_mut(eid) = popped; }
     }
 }
 
@@ -572,9 +576,9 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
 }
 
 fn species(e: &Entity, t: &Token) -> Option<&'static PokemonSpeciesData> {
-    match e.test_ref(t) {
-        ETRef::Pokemon(x) => Some(x.data(t).individual.species),
-        ETRef::Trainer(_) => None,
+    match e.test(t) {
+        ET::Pokemon(x) => Some(x.data(t).individual.species),
+        ET::Trainer(_) => None,
     }
 }
 
@@ -585,9 +589,9 @@ fn species_match(a: &Option<&'static PokemonSpeciesData>,
 }
 
 fn trainer(e: &Entity, t: &Token) -> Option<Trainer> {
-    match e.test_ref(t) {
-        ETRef::Pokemon(x) => x.data(t).individual.trainer.upgrade(),
-        ETRef::Trainer(x) => Some(x.clone()),
+    match e.test(t) {
+        ET::Pokemon(x) => x.data(t).individual.trainer.upgrade(),
+        ET::Trainer(x) => Some(x.clone()),
     }
 }
 
@@ -768,9 +772,9 @@ fn plan(known: &Knowledge, e: &Entity, t: &mut Token, input: &mut Option<Action>
     if entity.player {
         return input.take().unwrap_or(Action::WaitForInput)
     }
-    match e.test_ref(t) {
-        ETRef::Pokemon(x) => plan_pokemon(known, x, t),
-        ETRef::Trainer(_) => Action::Idle,
+    match e.test(t) {
+        ET::Pokemon(x) => plan_pokemon(known, x, t),
+        ET::Trainer(_) => Action::Idle,
     }
 }
 
@@ -1047,7 +1051,7 @@ impl State {
                     Some(cell) => if cell.age > 0 {
                         cell.tile.glyph.fg(Color::gray())
                     } else {
-                        cell.eid.map(|x| known.entity(x).glyph).unwrap_or(cell.tile.glyph)
+                        known.get_entity(cell).map(|x| x.glyph).unwrap_or(cell.tile.glyph)
                     }
                     None => unseen
                 };
