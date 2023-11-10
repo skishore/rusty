@@ -81,6 +81,10 @@ impl Glyph {
 
 // Geometry helpers
 
+pub fn clamp<T: PartialOrd>(x: T, min: T, max: T) -> T {
+    if x < min { min } else if x > max { max } else { x }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Point(pub i32, pub i32);
 assert_eq_size!(Point, 8);

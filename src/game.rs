@@ -6,7 +6,7 @@ use lazy_static::lazy_static;
 use rand::random;
 
 use crate::assert_eq_size;
-use crate::base::{Color, FOV, Glyph, HashMap, Matrix, Point};
+use crate::base::{Color, FOV, Glyph, HashMap, Matrix, Point, clamp};
 use crate::entity::{AIState, Assess, Fight, Flight, Wander};
 use crate::entity::{Pokemon, PokemonSpeciesData};
 use crate::entity::{Entity, ET, Token, Trainer, WeakEntity};
@@ -41,6 +41,8 @@ const ASTAR_LIMIT_ATTACK: i32 = 32;
 const ASTAR_LIMIT_WANDER: i32 = 256;
 const BFS_LIMIT_ATTACK: i32 = 8;
 const BFS_LIMIT_WANDER: i32 = 64;
+
+type Buffer = Matrix<Glyph>;
 
 #[derive(Eq, PartialEq)]
 pub enum Input { Escape, BackTab, Char(char) }
@@ -83,6 +85,45 @@ lazy_static! {
 
 //////////////////////////////////////////////////////////////////////////////
 
+struct PokemonView {
+    species: &'static PokemonSpeciesData,
+    hp: f64,
+    pp: f64,
+}
+
+struct TrainerView {
+    hp: f64,
+}
+
+enum EntityView {
+    Pokemon(PokemonView),
+    Trainer(TrainerView),
+}
+
+impl Default for EntityView {
+    fn default() -> Self { Self::Trainer(TrainerView { hp: 0. }) }
+}
+
+fn get_view(e: &Entity, t: &Token) -> EntityView {
+    match e.test(t) {
+        ET::Pokemon(x) => {
+            let base = x.base(t);
+            let data = &x.data(t).individual;
+            let hp = data.cur_hp as f64 / max(data.max_hp, 1) as f64;
+            let pp = 1. - clamp(base.move_timer as f64 / MOVE_TIMER as f64, 0., 1.);
+            let species = data.species;
+            EntityView::Pokemon(PokemonView { species, hp, pp })
+        }
+        ET::Trainer(x) => {
+            let data = &x.data(t);
+            let hp = data.cur_hp as f64 / max(data.max_hp, 1) as f64;
+            EntityView::Trainer(TrainerView { hp })
+        }
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 // Knowledge
 
 #[derive(Clone, Copy, Eq, PartialEq)] struct EntityIndex(i32);
@@ -95,6 +136,7 @@ struct CellKnowledge {
 }
 assert_eq_size!(CellKnowledge, 24);
 
+#[derive(Default)]
 struct EntityKnowledge {
     age: i32,
     pos: Point,
@@ -102,8 +144,9 @@ struct EntityKnowledge {
     moved: bool,
     rival: bool,
     weak: WeakEntity,
+    view: EntityView,
 }
-assert_eq_size!(EntityKnowledge, 32);
+assert_eq_size!(EntityKnowledge, 56);
 
 #[derive(Default)]
 struct Knowledge {
@@ -126,6 +169,10 @@ impl Knowledge {
             if x.eid.is_some() { return Status::Occupied; }
             if x.tile.blocked() { Status::Blocked } else { Status::Free }
         })
+    }
+
+    fn get_view_of(&self, e: &Entity) -> Option<&EntityKnowledge> {
+        self._entity_by_id.get(&e.id()).map(|x| self._entity_raw(*x))
     }
 
     fn can_see_now(&self, p: Point) -> bool {
@@ -156,9 +203,9 @@ impl Knowledge {
 
     fn update(&mut self, board: &BaseBoard, e: &Entity, t: &Token, vision: &Vision) {
         let my_entity = e.base(t);
+        let my_species = species(e, t);
         self._forget(my_entity.player);
         let offset = vision.offset - my_entity.pos;
-        let my_species = species(e, t);
 
         for point in &vision.cells_seen {
             let visibility = vision.visibility.get(*point + offset);
@@ -166,11 +213,6 @@ impl Knowledge {
 
             let eid = (|| {
                 let entity = board.get_entity_at(*point)?;
-                let species = species(entity, t);
-                let glyph = entity.base(t).glyph;
-                let (age, pos, moved) = (0, *point, false);
-                let rival = species.is_some() && species != my_species;
-
                 let eid = *self._entity_by_id.entry(entity.id()).and_modify(|x| {
                     let existing = &mut self.entities[x.0 as usize];
                     if !existing.moved && existing.pos != *point {
@@ -179,17 +221,22 @@ impl Knowledge {
                             y.eid = None;
                         });
                     };
-                    existing.age = age;
-                    existing.pos = pos;
-                    existing.glyph = glyph;
-                    existing.moved = moved;
                 }).or_insert_with(|| {
-                    let weak = entity.into();
-                    let data = EntityKnowledge { age, pos, glyph, moved, rival, weak };
-                    let result = EntityIndex(self.entities.len() as i32);
-                    self.entities.push(data);
-                    result
+                    self.entities.push(EntityKnowledge::default());
+                    self.entities.last_mut().unwrap().weak = entity.into();
+                    EntityIndex(self.entities.len() as i32 - 1)
                 });
+
+                let species = species(entity, t);
+                let entry = self._entity_mut(eid);
+
+                entry.age = 0;
+                entry.pos = *point;
+                entry.moved = false;
+                entry.glyph = entity.base(t).glyph;
+                entry.rival = species.is_some() && species != my_species;
+                entry.view = get_view(entity, t);
+
                 Some(eid)
             })();
 
@@ -709,7 +756,7 @@ fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
             if age >= switch && flight {
                 ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME });
             } else if age < switch && !flight {
-                let switch = min(max(2 * switch, MIN_FLIGHT_TIME), MAX_FLIGHT_TIME);
+                let switch = clamp(2 * switch, MIN_FLIGHT_TIME, MAX_FLIGHT_TIME);
                 ai = AIState::Flight(Flight { age, switch, target });
             }
             if let AIState::Flight(x) = &mut ai {
@@ -879,7 +926,7 @@ impl UI {
         let ss = UI_STATUS_SIZE;
         let (x, y) = (UI_MAP_SIZE_X, UI_MAP_SIZE_Y);
         let (col, row) = (UI_COL_SPACE, UI_ROW_SPACE);
-        let kl = Self::render_key(Some('a')).len() as i32;
+        let kl = Self::render_key('a').len() as i32;
         let w = 2 * x + 2 + 2 * (ss + kl + 2 * col);
         let h = y + 2 + row + UI_LOG_SIZE + row + 1;
 
@@ -907,7 +954,7 @@ impl UI {
         Self { log, map, rivals, status, target, bounds: Point(w, h) }
     }
 
-    fn render_bar(&self, buffer: &mut Matrix<Glyph>, width: i32, pos: Point, text: &str) {
+    fn render_bar(&self, buffer: &mut Buffer, width: i32, pos: Point, text: &str) {
         let shift = 2;
         let color: Color = UI_COLOR.into();
         let dashes = Glyph::char('-').fg(color);
@@ -923,7 +970,7 @@ impl UI {
         }
     }
 
-    fn render_box(&self, buffer: &mut Matrix<Glyph>, rect: &Rect) {
+    fn render_box(&self, buffer: &mut Buffer, rect: &Rect) {
         let Point(w, h) = rect.size;
         let color: Color = UI_COLOR.into();
         buffer.set(rect.root + Point(-1, -1), Glyph::char('┌').fg(color));
@@ -963,9 +1010,7 @@ impl UI {
         self.render_box(buffer, &self.map);
     }
 
-    fn render_key(key: Option<char>) -> String {
-        key.map(|x| format!("[{}] ", x)).unwrap_or_default()
-    }
+    fn render_key(key: char) -> String { format!("[{}] ", key) }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1026,12 +1071,16 @@ impl State {
             let mut overwrite = Matrix::new(size, Glyph::char(' '));
             std::mem::swap(buffer, &mut overwrite);
         }
+        buffer.fill(buffer.default);
         self.ui.render_frame(buffer);
 
-        let pos = self.player.base(&self.t).pos;
-        let known = self.board.get_known(&self.player);
+        let e = &self.player;
+        let known = self.board.get_known(e);
+        let pos = e.base(&self.t).pos;
         let offset = pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
         let unseen = Glyph::wide(' ');
+
+        self.render_status(known, e, buffer);
 
         for y in 0..UI_MAP_SIZE_Y {
             for x in 0..UI_MAP_SIZE_X {
@@ -1047,6 +1096,63 @@ impl State {
                 buffer.set(self.ui.map.root + Point(2 * x, y), glyph);
             }
         }
+    }
+
+    fn render_status(&self, known: &Knowledge, e: &Trainer, buffer: &mut Buffer) {
+        let entity = known.get_view_of(e);
+        if entity.is_none() { return; }
+        let view = &entity.unwrap().view;
+
+        let key = UI::render_key('a');
+        let mut offset = self.ui.status.root;
+        for line in self.render_entity(key, view) {
+            line.iter().enumerate().for_each(|(i, x)| {
+                buffer.set(offset + Point(i as i32, 0), *x);
+            });
+            offset.1 += 1;
+        }
+    }
+
+    fn render_entity(&self, mut key: String, view: &EntityView) -> Vec<Vec<Glyph>> {
+        let spacer = key.len();
+        let spacer = (0..spacer).map(|_| Glyph::char(' ')).collect::<Vec<_>>();
+
+        let mut result = vec![];
+        key.push_str("You");
+        result.push(key.chars().map(|x| Glyph::char(x)).collect());
+        match view {
+            EntityView::Pokemon(x) => {
+                let (hp_color, pp_color) = (self.hp_color(x.hp), 0x123.into());
+                result.push(spacer.clone());
+                result.last_mut().unwrap().append(&mut self.render_bar("HP: ", x.hp, hp_color));
+                result.push(spacer.clone());
+                result.last_mut().unwrap().append(&mut self.render_bar("HP: ", x.pp, pp_color));
+            }
+            EntityView::Trainer(x) => {
+                let hp_color = self.hp_color(x.hp);
+                result.push(spacer.clone());
+                result.last_mut().unwrap().append(&mut self.render_bar("HP: ", x.hp, hp_color));
+            }
+        }
+        result
+    }
+
+    fn render_bar(&self, prefix: &str, value: f64, color: Color) -> Vec<Glyph> {
+        let total = UI_STATUS_SIZE - 6;
+        let count = if value > 0. { max(1, (total as f64 * value) as i32) } else { 0 };
+        let glyph = Glyph::char('=').fg(color);
+        let empty = Glyph::char(' ');
+
+        let mut result = prefix.chars().map(|x| Glyph::char(x)).collect::<Vec<_>>();
+        result.push(Glyph::char('['));
+        for _ in 0..count { result.push(glyph); }
+        for _ in count..total { result.push(empty); }
+        result.push(Glyph::char(']'));
+        result
+    }
+
+    fn hp_color(&self, hp: f64) -> Color {
+        (if hp <= 0.25 { 0x300 } else if hp <= 0.50 { 0x330 } else { 0x020 }).into()
     }
 }
 

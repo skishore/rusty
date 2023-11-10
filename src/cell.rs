@@ -14,6 +14,10 @@ pub struct Cell<T: ?Sized> {
     value: UnsafeCell<T>,
 }
 
+impl<T> From<T> for Cell<T> {
+    fn from(t: T) -> Cell<T> { Cell::new(t) }
+}
+
 impl<T> Cell<T> {
     pub fn new(v: impl Into<T>) -> Self {
         Cell { value: UnsafeCell::new(v.into()) }

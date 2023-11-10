@@ -10,6 +10,7 @@ use crate::cell::{self, Cell};
 
 // Constants
 
+const TRAINER_HP: i32 = 8;
 const TRAINER_SPEED: f64 = 0.10;
 
 lazy_static! {
@@ -105,7 +106,10 @@ pub struct PokemonData {
     pub individual: Box<PokemonIndividualData>,
 }
 
-pub struct TrainerData {}
+pub struct TrainerData {
+    pub cur_hp: i32,
+    pub max_hp: i32,
+}
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -147,7 +151,8 @@ fn trainer(pos: Point, player: bool) -> EntityRepr {
         dir: Point(1, 0),
         pos,
     };
-    EntityRepr { base, data: EntityType::Trainer(TrainerData {}) }
+    let data = TrainerData { cur_hp: TRAINER_HP, max_hp: TRAINER_HP };
+    EntityRepr { base, data: EntityType::Trainer(data) }
 }
 
 //////////////////////////////////////////////////////////////////////////////
