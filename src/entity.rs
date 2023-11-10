@@ -200,8 +200,6 @@ impl Entity {
 
     pub fn id(&self) -> usize { Rc::as_ptr(&self.0) as usize }
 
-    pub fn same(&self, other: &Entity) -> bool { Rc::ptr_eq(&self.0, &other.0) }
-
     pub fn test<'a>(&'a self, t: &Token) -> ET<'a> {
         let p = self as *const Entity;
         match &self.0.get(t).data {
@@ -298,3 +296,34 @@ impl Trainer {
         unsafe { std::hint::unreachable_unchecked() }
     }
 }
+
+//////////////////////////////////////////////////////////////////////////////
+
+// More boilerplate: equality operators
+
+impl PartialEq for &'static PokemonSpeciesData {
+    fn eq(&self, next: &&'static PokemonSpeciesData) -> bool {
+        *self as *const PokemonSpeciesData ==
+        *next as *const PokemonSpeciesData
+    }
+}
+
+impl Eq for &'static PokemonSpeciesData {}
+
+impl PartialEq for Entity {
+    fn eq(&self, other: &Entity) -> bool { Rc::ptr_eq(&self.0, &other.0) }
+}
+
+impl Eq for Entity {}
+
+impl PartialEq for Pokemon {
+    fn eq(&self, other: &Pokemon) -> bool { Rc::ptr_eq(&self.0.0, &other.0.0) }
+}
+
+impl Eq for Pokemon {}
+
+impl PartialEq for Trainer {
+    fn eq(&self, other: &Trainer) -> bool { Rc::ptr_eq(&self.0.0, &other.0.0) }
+}
+
+impl Eq for Trainer {}

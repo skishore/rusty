@@ -169,7 +169,7 @@ impl Knowledge {
                 let species = species(entity, t);
                 let glyph = entity.base(t).glyph;
                 let (age, pos, moved) = (0, *point, false);
-                let rival = species.is_some() && !species_match(&my_species, &species);
+                let rival = species.is_some() && species != my_species;
 
                 let eid = *self._entity_by_id.entry(entity.id()).and_modify(|x| {
                     let existing = &mut self.entities[x.0 as usize];
@@ -430,7 +430,7 @@ impl Board {
 
     fn move_entity(&mut self, e: &Entity, t: &mut Token, to: Point) {
         let existing = self.entity_at_pos.remove(&e.base(t).pos).unwrap();
-        assert!(existing.same(e));
+        assert!(&existing == e);
         let collider = self.entity_at_pos.insert(to, existing);
         assert!(collider.is_none());
         e.base_mut(t).pos = to;
@@ -444,8 +444,8 @@ impl Board {
 
         // Remove entities other than the player.
         let existing = self.entity_at_pos.remove(&entity.pos).unwrap();
-        assert!(existing.same(e));
-        let index = self.entities.iter().position(|x| x.same(e)).unwrap();
+        assert!(&existing == e);
+        let index = self.entities.iter().position(|x| x == e).unwrap();
         self.entities.remove(index);
         self.known.remove(&e.id());
 
@@ -582,22 +582,11 @@ fn species(e: &Entity, t: &Token) -> Option<&'static PokemonSpeciesData> {
     }
 }
 
-fn species_match(a: &Option<&'static PokemonSpeciesData>,
-                 b: &Option<&'static PokemonSpeciesData>) -> bool {
-    a.map(|x| x as *const PokemonSpeciesData) ==
-    b.map(|x| x as *const PokemonSpeciesData)
-}
-
 fn trainer(e: &Entity, t: &Token) -> Option<Trainer> {
     match e.test(t) {
         ET::Pokemon(x) => x.data(t).individual.trainer.upgrade(),
         ET::Trainer(x) => Some(x.clone()),
     }
-}
-
-fn trainers_match(a: &Option<Trainer>, b: &Option<Trainer>) -> bool {
-    if let (Some(aa), Some(bb)) = (a, b) { return aa.same(bb); }
-    a.is_none() && b.is_none()
 }
 
 fn explore_near(known: &Knowledge, e: &Entity, t: &mut Token,
@@ -825,7 +814,7 @@ fn update_state(state: &mut State) {
     let needs_input = |state: &State| {
         if state.input.is_some() { return false; }
         let active = state.board.get_active_entity();
-        if !active.same(&state.player) { return false; }
+        if active != state.player.deref() { return false; }
         player_alive(state)
     };
 
