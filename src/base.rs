@@ -45,36 +45,48 @@ impl Color {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct Glyph {
-    pub ch: Char,
-    pub fg: Color,
-    pub bg: Color,
-}
-assert_eq_size!(Glyph, 4);
+pub struct Glyph(u32);
 
 impl Glyph {
-    pub fn char(ch: char) -> Glyph {
-        Glyph { ch: Char(ch as u16), fg: Color::default(), bg: Color::default() }
+    // Constructors
+
+    pub fn new(ch: Char, fg: Color, bg: Color) -> Self {
+        Self((ch.0 as u32) | ((fg.0 as u32) << 16) | ((bg.0 as u32) << 24))
     }
 
-    pub fn wide(ch: char) -> Glyph {
+    pub fn char(ch: char) -> Self {
+        Self::new(Char(ch as u16), Color::default(), Color::default())
+    }
+
+    pub fn chfg<T: Into<Color>>(ch: char, fg: T) -> Self {
+        Self::new(Char(ch as u16), fg.into(), Color::default())
+    }
+
+    pub fn wide(ch: char) -> Self {
         let ch = Char((ch as u16) + (0xff00 - 0x20));
-        Glyph { ch, fg: Color::default(), bg: Color::default() }
+        Self::new(ch, Color::default(), Color::default())
     }
 
-    pub fn wdfg<T: Into<Color>>(ch: char, fg: T) -> Glyph {
-        Glyph::wide(ch).fg(fg)
+    pub fn wdfg<T: Into<Color>>(ch: char, fg: T) -> Self {
+        let ch = Char((ch as u16) + (0xff00 - 0x20));
+        Self::new(ch, fg.into(), Color::default())
     }
 
-    pub fn fg<T: Into<Color>>(mut self, color: T) -> Glyph {
-        self.fg = color.into();
-        self
+    pub fn with_fg<T: Into<Color>>(&self, color: T) -> Self {
+        Self((self.0 & 0xff00ffff) | ((color.into().0 as u32) << 16))
     }
 
-    pub fn bg<T: Into<Color>>(mut self, color: T) -> Glyph {
-        self.bg = color.into();
-        self
+    pub fn with_bg<T: Into<Color>>(&self, color: T) -> Self {
+        Self((self.0 & 0x00ffffff) | ((color.into().0 as u32) << 24))
     }
+
+    // Field getters
+
+    pub fn ch(&self) -> Char { Char(self.0 as u16) }
+
+    pub fn fg(&self) -> Color { Color((self.0 >> 16) as u8) }
+
+    pub fn bg(&self) -> Color { Color((self.0 >> 24) as u8) }
 }
 
 //////////////////////////////////////////////////////////////////////////////

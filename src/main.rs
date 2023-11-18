@@ -25,6 +25,8 @@ struct Screen {
     output: termion::raw::RawTerminal<io::Stdout>,
     next: Matrix<Glyph>,
     prev: Matrix<Glyph>,
+    fg: Color,
+    bg: Color,
 }
 
 impl Screen {
@@ -33,7 +35,8 @@ impl Screen {
         let next = Matrix::new(size, Glyph::char(' '));
         let (x, y) = termion::terminal_size().unwrap();
         let output = io::stdout().into_raw_mode().unwrap();
-        Self { extent: Point(x as i32, y as i32), output, next, prev }
+        let (fg, bg) = (Color::default(), Color::default());
+        Self { extent: Point(x as i32, y as i32), output, next, prev, fg, bg }
     }
 
     fn render(&mut self, stats: &Stats, delta: f64) -> io::Result<()> {
@@ -57,15 +60,11 @@ impl Screen {
             write!(self.output, "{}", Goto(mx, my))?;
 
             let mut x = start;
-            let (mut fg, mut bg) = (Color::default(), Color::default());
-            self.set_foreground(fg)?;
-            self.set_background(fg)?;
             while x <= limit {
                 let glyph = self.next.get(Point(x, y));
-                if glyph.fg != fg { self.set_foreground(glyph.fg)?; }
-                if glyph.bg != bg { self.set_background(glyph.bg)?; }
-                (fg, bg) = (glyph.fg, glyph.bg);
-                x += self.write_char(glyph.ch)?;
+                self.set_foreground(glyph.fg())?;
+                self.set_background(glyph.bg())?;
+                x += self.write_char(glyph.ch())?;
             }
         }
         std::mem::swap(&mut self.next, &mut self.prev);
@@ -86,15 +85,26 @@ impl Screen {
 
     fn enter_alt_screen(&mut self) -> io::Result<()> {
         write!(self.output, "{}{}{}", ToAlternateScreen, Hide, clear::All)?;
+        self.reset_colors()?;
         self.output.flush()
     }
 
     fn exit_alt_screen(&mut self) -> io::Result<()> {
+        self.reset_colors()?;
         write!(self.output, "{}{}", ToMainScreen, Show)?;
         self.output.flush()
     }
 
+    fn reset_colors(&mut self) -> io::Result<()> {
+        self.set_foreground(Color::black())?;
+        self.set_background(Color::black())?;
+        self.set_foreground(Color::default())?;
+        self.set_background(Color::default())
+    }
+
     fn set_foreground(&mut self, color: Color) -> io::Result<()> {
+        if color == self.fg { return Ok(()); }
+        self.fg = color;
         if color.0 < 0xff {
             write!(self.output, "{}", color::Fg(color::AnsiValue(color.0)))
         } else {
@@ -103,6 +113,8 @@ impl Screen {
     }
 
     fn set_background(&mut self, color: Color) -> io::Result<()> {
+        if color == self.bg { return Ok(()); }
+        self.bg = color;
         if color.0 < 0xff {
             write!(self.output, "{}", color::Bg(color::AnsiValue(color.0)))
         } else {

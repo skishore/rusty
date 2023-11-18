@@ -953,14 +953,14 @@ impl UI {
     fn render_bar(&self, buffer: &mut Buffer, width: i32, pos: Point, text: &str) {
         let shift = 2;
         let color: Color = UI_COLOR.into();
-        let dashes = Glyph::char('-').fg(color);
+        let dashes = Glyph::chfg('-', color);
         let prefix_width = shift + text.chars().count() as i32;
         assert!(prefix_width <= width);
         for x in 0..shift {
             buffer.set(pos + Point(x, 0), dashes);
         }
         for (i, c) in text.chars().enumerate() {
-            buffer.set(pos + Point(i as i32 + shift, 0), Glyph::char(c).fg(color));
+            buffer.set(pos + Point(i as i32 + shift, 0), Glyph::chfg(c, color));
         }
         for x in prefix_width..width {
             buffer.set(pos + Point(x, 0), dashes);
@@ -970,13 +970,13 @@ impl UI {
     fn render_box(&self, buffer: &mut Buffer, rect: &Rect) {
         let Point(w, h) = rect.size;
         let color: Color = UI_COLOR.into();
-        buffer.set(rect.root + Point(-1, -1), Glyph::char('┌').fg(color));
-        buffer.set(rect.root + Point( w, -1), Glyph::char('┐').fg(color));
-        buffer.set(rect.root + Point(-1,  h), Glyph::char('└').fg(color));
-        buffer.set(rect.root + Point( w,  h), Glyph::char('┘').fg(color));
+        buffer.set(rect.root + Point(-1, -1), Glyph::chfg('┌', color));
+        buffer.set(rect.root + Point( w, -1), Glyph::chfg('┐', color));
+        buffer.set(rect.root + Point(-1,  h), Glyph::chfg('└', color));
+        buffer.set(rect.root + Point( w,  h), Glyph::chfg('┘', color));
 
-        let tall = Glyph::char('│').fg(color);
-        let flat = Glyph::char('─').fg(color);
+        let tall = Glyph::chfg('│', color);
+        let flat = Glyph::chfg('─', color);
         for x in 0..w {
             buffer.set(rect.root + Point(x, -1), flat);
             buffer.set(rect.root + Point(x,  h), flat);
@@ -1084,7 +1084,7 @@ impl State {
                 let point = Point(x, y);
                 let glyph = match known.get_cell(point + offset) {
                     Some(cell) => if cell.age > 0 {
-                        cell.tile.glyph.fg(Color::gray())
+                        cell.tile.glyph.with_fg(Color::gray())
                     } else {
                         known.get_entity(cell).map(|x| x.glyph).unwrap_or(cell.tile.glyph)
                     }
@@ -1128,7 +1128,7 @@ impl State {
     fn render_bar<'a>(&self, value: f64, color: Color, slice: &mut Slice) {
         let total = UI_STATUS_SIZE - 6;
         let count = if value > 0. { max(1, (total as f64 * value) as i32) } else { 0 };
-        let glyph = Glyph::char('=').fg(color);
+        let glyph = Glyph::chfg('=', color);
         let empty = Glyph::char(' ');
 
         slice.write_chr(Glyph::char('['));
