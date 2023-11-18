@@ -6,7 +6,8 @@ use lazy_static::lazy_static;
 use rand::random;
 
 use crate::assert_eq_size;
-use crate::base::{Color, FOV, Glyph, HashMap, Matrix, Point, clamp};
+use crate::base::{Buffer, Color, Glyph, Slice};
+use crate::base::{FOV, HashMap, Matrix, Point, Rect, clamp};
 use crate::entity::{AIState, Assess, Fight, Flight, Wander};
 use crate::entity::{Pokemon, PokemonSpeciesData};
 use crate::entity::{Entity, ET, Token, Trainer, WeakEntity};
@@ -41,8 +42,6 @@ const ASTAR_LIMIT_ATTACK: i32 = 32;
 const ASTAR_LIMIT_WANDER: i32 = 256;
 const BFS_LIMIT_ATTACK: i32 = 8;
 const BFS_LIMIT_WANDER: i32 = 64;
-
-type Buffer = Matrix<Glyph>;
 
 #[derive(Eq, PartialEq)]
 pub enum Input { Escape, BackTab, Char(char) }
@@ -909,9 +908,6 @@ const UI_MAP_SIZE_Y: i32 = 43;
 const UI_STATUS_SIZE: i32 = 30;
 const UI_COLOR: i32 = 0x430;
 
-#[derive(Clone, Copy)]
-struct Rect { root: Point, size: Point }
-
 struct UI {
     log: Rect,
     map: Rect,
@@ -926,7 +922,7 @@ impl UI {
         let ss = UI_STATUS_SIZE;
         let (x, y) = (UI_MAP_SIZE_X, UI_MAP_SIZE_Y);
         let (col, row) = (UI_COL_SPACE, UI_ROW_SPACE);
-        let kl = Self::render_key('a').len() as i32;
+        let kl = Self::render_key('a').chars().count() as i32;
         let w = 2 * x + 2 + 2 * (ss + kl + 2 * col);
         let h = y + 2 + row + UI_LOG_SIZE + row + 1;
 
@@ -958,14 +954,15 @@ impl UI {
         let shift = 2;
         let color: Color = UI_COLOR.into();
         let dashes = Glyph::char('-').fg(color);
-        assert!(shift + text.len() as i32 <= width);
+        let prefix_width = shift + text.chars().count() as i32;
+        assert!(prefix_width <= width);
         for x in 0..shift {
             buffer.set(pos + Point(x, 0), dashes);
         }
         for (i, c) in text.chars().enumerate() {
             buffer.set(pos + Point(i as i32 + shift, 0), Glyph::char(c).fg(color));
         }
-        for x in (shift + text.len() as i32)..width {
+        for x in prefix_width..width {
             buffer.set(pos + Point(x, 0), dashes);
         }
     }
@@ -990,7 +987,7 @@ impl UI {
         }
     }
 
-    fn render_frame(&self, buffer: &mut Matrix<Glyph>) {
+    fn render_frame(&self, buffer: &mut Buffer) {
         let ml = self.map.root.0 - 1;
         let mw = self.map.size.0 + 2;
         let mh = self.map.size.1 + 2;
@@ -1065,8 +1062,8 @@ impl State {
 
     pub fn update(&mut self) { update_state(self); }
 
-    pub fn render(&self, buffer: &mut Matrix<Glyph>) {
-        if buffer.data.len() == 0 {
+    pub fn render(&self, buffer: &mut Buffer) {
+        if buffer.data.is_empty() {
             let size = self.ui.bounds;
             let mut overwrite = Matrix::new(size, Glyph::char(' '));
             std::mem::swap(buffer, &mut overwrite);
@@ -1080,7 +1077,7 @@ impl State {
         let offset = pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
         let unseen = Glyph::wide(' ');
 
-        self.render_status(known, e, buffer);
+        self.render_status(known, e, &mut Slice::new(buffer, self.ui.status));
 
         for y in 0..UI_MAP_SIZE_Y {
             for x in 0..UI_MAP_SIZE_X {
@@ -1098,57 +1095,46 @@ impl State {
         }
     }
 
-    fn render_status(&self, known: &Knowledge, e: &Trainer, buffer: &mut Buffer) {
-        let entity = known.get_view_of(e);
-        if entity.is_none() { return; }
-        let view = &entity.unwrap().view;
-
-        let key = UI::render_key('a');
-        let mut offset = self.ui.status.root;
-        for line in self.render_entity(key, view) {
-            line.iter().enumerate().for_each(|(i, x)| {
-                buffer.set(offset + Point(i as i32, 0), *x);
-            });
-            offset.1 += 1;
+    fn render_status(&self, known: &Knowledge, e: &Trainer, slice: &mut Slice) {
+        if let Some(entity) = known.get_view_of(e) {
+            self.render_entity(UI::render_key('a'), &entity.view, slice);
         }
     }
 
-    fn render_entity(&self, mut key: String, view: &EntityView) -> Vec<Vec<Glyph>> {
-        let spacer = key.len();
-        let spacer = (0..spacer).map(|_| Glyph::char(' ')).collect::<Vec<_>>();
+    fn render_entity(&self, prefix: String, view: &EntityView, slice: &mut Slice) {
+        slice.newline();
+        slice.write_str(&prefix).write_str("You").newline();
 
-        let mut result = vec![];
-        key.push_str("You");
-        result.push(key.chars().map(|x| Glyph::char(x)).collect());
+        let n = prefix.chars().count();
+        let status_bar_line = |p: &str, v: f64, c: Color, s: &mut Slice| {
+            self.render_bar(v, c, s.spaces(n).write_str(p));
+            s.newline();
+        };
+
         match view {
             EntityView::Pokemon(x) => {
                 let (hp_color, pp_color) = (self.hp_color(x.hp), 0x123.into());
-                result.push(spacer.clone());
-                result.last_mut().unwrap().append(&mut self.render_bar("HP: ", x.hp, hp_color));
-                result.push(spacer.clone());
-                result.last_mut().unwrap().append(&mut self.render_bar("HP: ", x.pp, pp_color));
+                status_bar_line("HP: ", x.hp, hp_color, slice);
+                status_bar_line("PP: ", x.pp, pp_color, slice);
             }
             EntityView::Trainer(x) => {
                 let hp_color = self.hp_color(x.hp);
-                result.push(spacer.clone());
-                result.last_mut().unwrap().append(&mut self.render_bar("HP: ", x.hp, hp_color));
+                status_bar_line("HP: ", x.hp, hp_color, slice);
             }
         }
-        result
+        slice.newline();
     }
 
-    fn render_bar(&self, prefix: &str, value: f64, color: Color) -> Vec<Glyph> {
+    fn render_bar<'a>(&self, value: f64, color: Color, slice: &mut Slice) {
         let total = UI_STATUS_SIZE - 6;
         let count = if value > 0. { max(1, (total as f64 * value) as i32) } else { 0 };
         let glyph = Glyph::char('=').fg(color);
         let empty = Glyph::char(' ');
 
-        let mut result = prefix.chars().map(|x| Glyph::char(x)).collect::<Vec<_>>();
-        result.push(Glyph::char('['));
-        for _ in 0..count { result.push(glyph); }
-        for _ in count..total { result.push(empty); }
-        result.push(Glyph::char(']'));
-        result
+        slice.write_chr(Glyph::char('['));
+        for _ in 0..count { slice.write_chr(glyph); }
+        for _ in count..total { slice.write_chr(empty); }
+        slice.write_chr(Glyph::char(']'));
     }
 
     fn hp_color(&self, hp: f64) -> Color {

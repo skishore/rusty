@@ -158,6 +158,84 @@ impl<T: Copy> Matrix<T> {
 
 //////////////////////////////////////////////////////////////////////////////
 
+pub type Buffer = Matrix<Glyph>;
+
+#[derive(Clone, Copy)]
+pub struct Rect { pub root: Point, pub size: Point }
+
+pub struct Slice<'a> {
+    buffer: &'a mut Buffer,
+    bounds: Rect,
+    cursor: Point,
+}
+
+impl<'a> From<&'a mut Buffer> for Slice<'a> {
+    fn from(buffer: &'a mut Buffer) -> Slice<'a> {
+        let (root, size) = (Point::default(), buffer.size);
+        Slice::new(buffer, Rect { root, size })
+    }
+}
+
+impl<'a> Slice<'a> {
+    pub fn new(buffer: &'a mut Buffer, bounds: Rect) -> Self {
+        Self { buffer, bounds, cursor: Point::default() }
+    }
+
+    // Basic API
+
+    pub fn get(&self, point: Point) -> Glyph {
+        if !self.contains(point) { return self.buffer.default; }
+        self.buffer.get(self.bounds.root + point)
+    }
+
+    pub fn set(&mut self, point: Point, glyph: Glyph) {
+        if !self.contains(point) { return; }
+        self.buffer.set(self.bounds.root + point, glyph);
+    }
+
+    pub fn contains(&self, point: Point) -> bool {
+        let Point(px, py) = point;
+        let Point(sx, sy) = self.bounds.size;
+        0 <= px && px < sx && 0 <= py && py < sy
+    }
+
+    // Cursor API
+
+    pub fn move_cursor(&mut self, cursor: Point) -> &mut Self {
+        self.cursor = cursor;
+        self
+    }
+
+    pub fn newline(&mut self) -> &mut Self {
+        self.newlines(1)
+    }
+
+    pub fn newlines(&mut self, n: usize) -> &mut Self {
+        self.move_cursor(Point(0, self.cursor.1 + n as i32))
+    }
+
+    pub fn space(&mut self) -> &mut Self {
+        self.spaces(1)
+    }
+
+    pub fn spaces(&mut self, n: usize) -> &mut Self {
+        self.cursor.0 += n as i32;
+        self
+    }
+
+    pub fn write_chr(&mut self, glyph: Glyph) -> &mut Self {
+        self.set(self.cursor, glyph);
+        self.space()
+    }
+
+    pub fn write_str(&mut self, text: &str) -> &mut Self {
+        text.chars().for_each(|x| { self.write_chr(Glyph::char(x)); });
+        self
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 // Field-of-vision helpers
 
 #[allow(non_snake_case)]
