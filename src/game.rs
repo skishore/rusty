@@ -9,7 +9,7 @@ use crate::assert_eq_size;
 use crate::base::{Buffer, Color, Glyph, Slice};
 use crate::base::{FOV, HashMap, Matrix, Point, Rect, clamp};
 use crate::entity::{AIState, Assess, Fight, Flight, Wander};
-use crate::entity::{Pokemon, PokemonSpeciesData};
+use crate::entity::{Pokemon, PokemonEdge, PokemonSpeciesData};
 use crate::entity::{Entity, ET, Token, Trainer, WeakEntity};
 use crate::pathing::{AStar, DijkstraMap, DijkstraMode};
 use crate::pathing::{DIRECTIONS, BFS, BFSResult, Status};
@@ -107,11 +107,10 @@ fn get_view(e: &Entity, t: &Token) -> EntityView {
     match e.test(t) {
         ET::Pokemon(x) => {
             let base = x.base(t);
-            let data = &x.data(t).individual;
-            let hp = data.cur_hp as f64 / max(data.max_hp, 1) as f64;
+            let me = &x.data(t).me;
+            let hp = me.cur_hp as f64 / max(me.max_hp, 1) as f64;
             let pp = 1. - clamp(base.move_timer as f64 / MOVE_TIMER as f64, 0., 1.);
-            let species = data.species;
-            EntityView::Pokemon(PokemonView { species, hp, pp })
+            EntityView::Pokemon(PokemonView { species: me.species, hp, pp })
         }
         ET::Trainer(x) => {
             let data = &x.data(t);
@@ -483,6 +482,26 @@ impl Board {
     }
 
     fn remove_entity(&mut self, e: &Entity, t: &mut Token) {
+        // Delete hard edges from this entity to others.
+        match e.test(t) {
+            ET::Pokemon(x) => {
+                if let Some(trainer) = x.data(t).me.trainer.clone() {
+                    let me = x.data(t).me.clone();
+                    let trainer = trainer.data_mut(t);
+                    let index = trainer.pokemon.iter().position(
+                        |y| if let PokemonEdge::Out(z) = y && z == x { true } else { false });
+                    trainer.pokemon[index.unwrap()] = PokemonEdge::In(me);
+                }
+            }
+            ET::Trainer(x) => {
+                let pokemon = x.data(t).pokemon.iter().filter_map(|y| match y {
+                    PokemonEdge::Out(y) => Some(y.clone()),
+                    PokemonEdge::In(_) => None,
+                }).collect::<Vec<_>>();
+                pokemon.iter().for_each(|y| y.data_mut(t).me.trainer = None);
+            }
+        }
+
         // The player is just tagged "removed", so we always have an entity.
         let entity = e.base_mut(t);
         entity.removed = true;
@@ -623,14 +642,14 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
 
 fn species(e: &Entity, t: &Token) -> Option<&'static PokemonSpeciesData> {
     match e.test(t) {
-        ET::Pokemon(x) => Some(x.data(t).individual.species),
+        ET::Pokemon(x) => Some(x.data(t).me.species),
         ET::Trainer(_) => None,
     }
 }
 
 fn trainer(e: &Entity, t: &Token) -> Option<Trainer> {
     match e.test(t) {
-        ET::Pokemon(x) => x.data(t).individual.trainer.upgrade(),
+        ET::Pokemon(x) => x.data(t).me.trainer.clone(),
         ET::Trainer(x) => Some(x.clone()),
     }
 }
@@ -735,7 +754,7 @@ fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
     let mut ai = AIState::default();
     std::mem::swap(&mut ai, &mut e.data_mut(t).ai);
 
-    let prey = e.data(t).individual.species.name == "Pidgey";
+    let prey = e.data(t).me.species.name == "Pidgey";
     let mut targets: Vec<(i32, Point)> = vec![];
     for entity in known.entities.iter() {
         if !entity.rival { continue; }
@@ -1034,8 +1053,13 @@ impl State {
             if !board.map.get(pos).blocked() { break; }
         }
 
-        let t = unsafe { Token::new() };
-        let player = Trainer::new(pos, true);
+        let mut t = unsafe { Token::new() };
+        let mut player = Trainer::new(pos, true);
+        player.register_pokemon(&mut t, "Bulbasaur");
+        player.register_pokemon(&mut t, "Charmander");
+        player.register_pokemon(&mut t, "Squirtle");
+        player.register_pokemon(&mut t, "Eevee");
+        player.register_pokemon(&mut t, "Pikachu");
         board.add_entity(&player, &t);
 
         let rng = |n: i32| random::<i32>().rem_euclid(n);

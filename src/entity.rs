@@ -16,8 +16,13 @@ const TRAINER_SPEED: f64 = 0.10;
 lazy_static! {
     static ref POKEMON_SPECIES: HashMap<&'static str, PokemonSpeciesData> = {
         let items = [
-            ("Pidgey",  30, 0.33, Glyph::wide('P')),
-            ("Ratatta", 60, 0.25, Glyph::wide('R')),
+            ("Bulbasaur",  90, 0.17, Glyph::wdfg('B', 0x020)),
+            ("Charmander", 80, 0.20, Glyph::wdfg('C', 0x410)),
+            ("Squirtle",   70, 0.25, Glyph::wdfg('S', 0x234)),
+            ("Eevee",      80, 0.20, Glyph::wdfg('E', 0x420)),
+            ("Pikachu",    60, 0.25, Glyph::wdfg('P', 0x440)),
+            ("Pidgey",     30, 0.33, Glyph::wide('P')),
+            ("Ratatta",    60, 0.25, Glyph::wide('R')),
         ];
         let mut result = HashMap::default();
         for (name, hp, speed, glyph) in items {
@@ -94,46 +99,58 @@ pub struct PokemonSpeciesData {
     pub hp: i32,
 }
 
+#[derive(Clone)]
 pub struct PokemonIndividualData {
     pub species: &'static PokemonSpeciesData,
-    pub trainer: WeakTrainer,
+    pub trainer: Option<Trainer>,
     pub cur_hp: i32,
     pub max_hp: i32,
 }
 
 pub struct PokemonData {
     pub ai: AIState,
-    pub individual: Box<PokemonIndividualData>,
+    pub me: Box<PokemonIndividualData>,
+}
+
+pub enum PokemonEdge {
+    Out(Pokemon),
+    In(Box<PokemonIndividualData>),
 }
 
 pub struct TrainerData {
     pub cur_hp: i32,
     pub max_hp: i32,
+    pub pokemon: Vec<PokemonEdge>,
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 // Constructors
 
-fn pokemon(pos: Point, dir: Point, species: &str, trainer: Option<&Trainer>) -> EntityRepr {
-    let species = POKEMON_SPECIES.get(species).unwrap();
-    let individual = PokemonIndividualData {
+fn individual(species: &str, trainer: Option<Trainer>) -> Box<PokemonIndividualData> {
+    let species = POKEMON_SPECIES.get(species).unwrap_or_else(
+        || panic!("Unknown Pokemon species: {}", species));
+    let me = PokemonIndividualData {
         species,
-        trainer: trainer.map(|x| x.into()).unwrap_or_default(),
+        trainer,
         cur_hp: species.hp,
         max_hp: species.hp,
     };
+    Box::new(me)
+}
+
+fn pokemon(pos: Point, dir: Point, species: &str, trainer: Option<Trainer>) -> EntityRepr {
     let data = PokemonData {
         ai: AIState::default(),
-        individual: Box::new(individual),
+        me: individual(species, trainer),
     };
     let base = EntityData {
         player: false,
         removed: false,
         move_timer: 0,
         turn_timer: 0,
-        glyph: species.glyph,
-        speed: species.speed,
+        glyph: data.me.species.glyph,
+        speed: data.me.species.speed,
         dir,
         pos,
     };
@@ -151,7 +168,7 @@ fn trainer(pos: Point, player: bool) -> EntityRepr {
         dir: Point(1, 0),
         pos,
     };
-    let data = TrainerData { cur_hp: TRAINER_HP, max_hp: TRAINER_HP };
+    let data = TrainerData { cur_hp: TRAINER_HP, max_hp: TRAINER_HP, pokemon: vec![] };
     EntityRepr { base, data: EntityType::Trainer(data) }
 }
 
@@ -241,7 +258,7 @@ impl Deref for WeakPokemon {
 }
 
 impl Pokemon {
-    pub fn new(pos: Point, dir: Point, species: &str, trainer: Option<&Trainer>) -> Pokemon {
+    pub fn new(pos: Point, dir: Point, species: &str, trainer: Option<Trainer>) -> Pokemon {
         Pokemon(Entity(Rc::new(Cell::new(pokemon(pos, dir, species, trainer)))))
     }
 
@@ -299,6 +316,11 @@ impl Trainer {
         let data = &mut self.0.0.get_mut(t).data;
         if let EntityType::Trainer(ref mut x) = data { return x; }
         unsafe { std::hint::unreachable_unchecked() }
+    }
+
+    pub fn register_pokemon(&mut self, t: &mut Token, species: &str) {
+        let me = individual(species, Some(self.clone()));
+        self.data_mut(t).pokemon.push(PokemonEdge::In(me));
     }
 }
 
