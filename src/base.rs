@@ -35,7 +35,7 @@ impl Default for Color {
 }
 
 impl From<i32> for Color {
-    fn from(val: i32) -> Color {
+    fn from(val: i32) -> Self {
         let r = (val >> 8) & 0xf;
         let g = (val >> 4) & 0xf;
         let b = val & 0xf;
@@ -44,12 +44,16 @@ impl From<i32> for Color {
 }
 
 impl Color {
-    pub fn black() -> Color { Color(16) }
-    pub fn gray() -> Color { Color(16 + 216 + 4) }
+    pub fn black() -> Self { Self(16) }
+    pub fn gray() -> Self { Self(16 + 216 + 5) }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Glyph(u32);
+
+impl From<char> for Glyph {
+    fn from(val: char) -> Self { Self::char(val) }
+}
 
 impl Glyph {
     // Constructors
@@ -223,6 +227,8 @@ impl<'a> Slice<'a> {
 
     // Cursor API
 
+    pub fn get_cursor(&self) -> Point { self.cursor }
+
     pub fn newline(&mut self) -> &mut Self {
         self.newlines(1)
     }
@@ -241,13 +247,14 @@ impl<'a> Slice<'a> {
         self
     }
 
-    pub fn write_chr(&mut self, glyph: Glyph) -> &mut Self {
+    pub fn write_chr<T: Into<Glyph>>(&mut self, t: T) -> &mut Self {
+        let glyph = t.into();
         self.set(self.cursor, glyph);
         self.spaces(if glyph.ch().is_wide() { 2 } else { 1 })
     }
 
     pub fn write_str(&mut self, text: &str) -> &mut Self {
-        text.chars().for_each(|x| { self.write_chr(Glyph::char(x)); });
+        text.chars().for_each(|x| { self.write_chr(x); });
         self
     }
 

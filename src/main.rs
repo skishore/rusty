@@ -31,8 +31,8 @@ struct Screen {
 
 impl Screen {
     fn new(size: Point) -> Self {
-        let prev = Matrix::new(size, Glyph::char(' '));
-        let next = Matrix::new(size, Glyph::char(' '));
+        let prev = Matrix::new(size, ' '.into());
+        let next = Matrix::new(size, ' '.into());
         let (x, y) = termion::terminal_size().unwrap();
         let output = io::stdout().into_raw_mode().unwrap();
         let (fg, bg) = (Color::default(), Color::default());

@@ -120,6 +120,7 @@ pub enum PokemonEdge {
 pub struct TrainerData {
     pub cur_hp: i32,
     pub max_hp: i32,
+    pub name: Rc<str>,
     pub pokemon: Vec<PokemonEdge>,
 }
 
@@ -157,7 +158,7 @@ fn pokemon(pos: Point, dir: Point, species: &str, trainer: Option<Trainer>) -> E
     EntityRepr { base, data: EntityType::Pokemon(data) }
 }
 
-fn trainer(pos: Point, player: bool) -> EntityRepr {
+fn trainer(pos: Point, player: bool, name: &str) -> EntityRepr {
     let base = EntityData {
         player,
         removed: false,
@@ -168,7 +169,8 @@ fn trainer(pos: Point, player: bool) -> EntityRepr {
         dir: Point(1, 0),
         pos,
     };
-    let data = TrainerData { cur_hp: TRAINER_HP, max_hp: TRAINER_HP, pokemon: vec![] };
+    let (cur_hp, max_hp) = (TRAINER_HP, TRAINER_HP);
+    let data = TrainerData { cur_hp, max_hp, name: name.into(), pokemon: vec![] };
     EntityRepr { base, data: EntityType::Trainer(data) }
 }
 
@@ -193,6 +195,9 @@ pub enum ET<'a> {
 
 pub type Token = cell::Token<EntityRepr>;
 
+#[derive(Copy, Clone, Eq, Hash, PartialEq)]
+pub struct EID(*const Cell<EntityRepr>);
+
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct Entity(Rc<Cell<EntityRepr>>);
@@ -206,7 +211,7 @@ impl From<&Entity> for WeakEntity {
 }
 
 impl WeakEntity {
-    pub fn id(&self) -> usize { Weak::as_ptr(&self.0) as usize }
+    pub fn id(&self) -> EID { EID(Weak::as_ptr(&self.0)) }
 
     pub fn upgrade(&self) -> Option<Entity> { self.0.upgrade().map(|x| Entity(x)) }
 }
@@ -220,7 +225,7 @@ impl Entity {
         &mut self.0.get_mut(t).base
     }
 
-    pub fn id(&self) -> usize { Rc::as_ptr(&self.0) as usize }
+    pub fn id(&self) -> EID { EID(Rc::as_ptr(&self.0)) }
 
     pub fn test<'a>(&'a self, t: &Token) -> ET<'a> {
         let p = self as *const Entity;
@@ -302,8 +307,8 @@ impl Deref for WeakTrainer {
 }
 
 impl Trainer {
-    pub fn new(pos: Point, player: bool) -> Trainer {
-        Trainer(Entity(Rc::new(Cell::new(trainer(pos, player)))))
+    pub fn new(pos: Point, player: bool, name: &str) -> Trainer {
+        Trainer(Entity(Rc::new(Cell::new(trainer(pos, player, name)))))
     }
 
     pub fn data<'a>(&'a self, t: &'a Token) -> &'a TrainerData {

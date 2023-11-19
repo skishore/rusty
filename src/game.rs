@@ -1,6 +1,7 @@
 use std::cmp::{max, min};
-use std::ops::{Deref, DerefMut};
 use std::f64::consts::TAU;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 
 use lazy_static::lazy_static;
 use rand::random;
@@ -11,7 +12,7 @@ use crate::base::{FOV, HashMap, Matrix, Point, Rect, clamp};
 use crate::entity::{AIState, Assess, Fight, Flight, Wander};
 use crate::entity::{Pokemon, PokemonEdge};
 use crate::entity::{PokemonIndividualData as PID, PokemonSpeciesData as PSD};
-use crate::entity::{Entity, ET, Token, Trainer, WeakEntity};
+use crate::entity::{Entity, EID, ET, Token, Trainer, WeakEntity};
 use crate::pathing::{AStar, DijkstraMap, DijkstraMode};
 use crate::pathing::{DIRECTIONS, BFS, BFSResult, Status};
 
@@ -94,6 +95,7 @@ struct PokemonView {
 
 struct TrainerView {
     hp: f64,
+    name: Rc<str>,
 }
 
 enum EntityView {
@@ -102,7 +104,7 @@ enum EntityView {
 }
 
 impl Default for EntityView {
-    fn default() -> Self { Self::Trainer(TrainerView { hp: 0. }) }
+    fn default() -> Self { Self::Trainer(TrainerView { hp: 0., name: "".into() }) }
 }
 
 fn get_hp(me: &PID) -> f64 {
@@ -123,8 +125,9 @@ fn get_view(e: &Entity, t: &Token) -> EntityView {
         }
         ET::Trainer(x) => {
             let data = &x.data(t);
+            let name = data.name.clone();
             let hp = data.cur_hp as f64 / max(data.max_hp, 1) as f64;
-            EntityView::Trainer(TrainerView { hp })
+            EntityView::Trainer(TrainerView { hp, name })
         }
     }
 }
@@ -147,19 +150,22 @@ assert_eq_size!(CellKnowledge, 24);
 struct EntityKnowledge {
     age: i32,
     pos: Point,
+    dir: Point,
     glyph: Glyph,
     moved: bool,
     rival: bool,
+    player: bool,
     weak: WeakEntity,
     view: EntityView,
 }
-assert_eq_size!(EntityKnowledge, 64);
+assert_eq_size!(EntityKnowledge, 72);
 
 #[derive(Default)]
 struct Knowledge {
     _map: HashMap<Point, CellKnowledge>,
-    _entity_by_id: HashMap<usize, EntityIndex>,
+    _entity_by_id: HashMap<EID, EntityIndex>,
     entities: Vec<EntityKnowledge>,
+    focus: Option<EID>,
 }
 
 impl Knowledge {
@@ -178,8 +184,8 @@ impl Knowledge {
         })
     }
 
-    fn get_view_of(&self, e: &Entity) -> Option<&EntityKnowledge> {
-        self._entity_by_id.get(&e.id()).map(|x| self._entity_raw(*x))
+    fn get_view_of(&self, eid: EID) -> Option<&EntityKnowledge> {
+        self._entity_by_id.get(&eid).map(|x| self._entity_raw(*x))
     }
 
     fn can_see_now(&self, p: Point) -> bool {
@@ -239,6 +245,7 @@ impl Knowledge {
 
                 entry.age = 0;
                 entry.pos = *point;
+                entry.dir = entity.base(t).dir;
                 entry.moved = false;
                 entry.glyph = entity.base(t).glyph;
                 entry.rival = species.is_some() && species != my_species;
@@ -288,6 +295,7 @@ impl Knowledge {
     }
 
     fn _remove_entity(&mut self, eid: EntityIndex) {
+        let id = self._entity_raw(eid).weak.id();
         let popped = self.entities.pop().unwrap();
         let popped_eid = EntityIndex(self.entities.len() as i32);
         let swap = eid != popped_eid;
@@ -299,12 +307,14 @@ impl Knowledge {
         }
 
         let deleted = if swap {
-            self._entity_by_id.remove(&self._entity_raw(eid).weak.id());
+            self._entity_by_id.remove(&id);
             self._entity_by_id.insert(popped.weak.id(), eid)
         } else {
             self._entity_by_id.remove(&popped.weak.id())
         };
         assert!(deleted == Some(popped_eid));
+
+        if self.focus == Some(id) { self.focus = None; }
 
         if swap { *self._entity_mut(eid) = popped; }
     }
@@ -355,7 +365,7 @@ struct Board {
     fov_large: FOV,
     fov_small: FOV,
     vision: Vision,
-    known: HashMap<usize, Box<Knowledge>>,
+    known: HashMap<EID, Box<Knowledge>>,
     logs: Vec<LogLine>,
 }
 
@@ -395,17 +405,14 @@ impl BaseBoard {
 
     // Field-of-vision
 
-    fn compute_vision(&self, e: &Entity, t: &Token, fov: &mut FOV, vision: &mut Vision) {
-        let entity = e.base(t);
-        let omni = entity.player;
-        let pos = entity.pos;
-        let dir = entity.dir;
-
+    fn compute_vision<F: Fn(Point) -> &'static Tile>(
+            &self, player: bool, pos: Point, dir: Point, f: F,
+            fov: &mut FOV, vision: &mut Vision) {
         vision.visibility.fill(-1);
         vision.cells_seen.clear();
 
         let blocked = |p: Point, prev: Option<&Point>| {
-            if !omni && !Self::in_vision_cone(dir, p) { return true; }
+            if !player && !Self::in_vision_cone(dir, p) { return true; }
 
             let lookup = p + vision.offset;
             let cached = vision.visibility.get(lookup);
@@ -416,7 +423,7 @@ impl BaseBoard {
                 // only see cells at a distanceNethack <= kVisionRadius.
                 if prev.is_none() { return 100 * (VISION_RADIUS + 1) - 95 - 46 - 25; }
 
-                let tile = self.map.get(p + pos);
+                let tile = f(p + pos);
                 if tile.blocked() { return 0; }
 
                 let parent = prev.unwrap();
@@ -480,10 +487,15 @@ impl Board {
         self.known.get(&e.id()).unwrap()
     }
 
+    fn set_focus(&mut self, e: &Entity, focus: Option<EID>) {
+        self.known.get_mut(&e.id()).unwrap().focus = focus;
+    }
+
     fn update_known(&mut self, e: &Entity, t: &Token) -> &Knowledge {
-        let player = e.base(t).player;
+        let base = &self.base;
+        let (player, pos, dir) = (e.base(t).player, e.base(t).pos, e.base(t).dir);
         let fov = if player { &mut self.fov_large } else { &mut self.fov_small };
-        self.base.compute_vision(e, t, fov, &mut self.vision);
+        base.compute_vision(player, pos, dir, |p| base.map.get(p), fov, &mut self.vision);
         let known = self.known.get_mut(&e.id()).unwrap();
         known.update(&self.base, e, t, &self.vision);
         known
@@ -923,6 +935,28 @@ fn process_input(state: &mut State, input: Input) {
         return;
     }
 
+    let get_tabbed_target = |prev: Option<EID>, tab_off: bool| -> Option<EID> {
+        let known = state.board.get_known(&state.player);
+        let rivals = rivals(known, &state.player, &state.t);
+        if rivals.is_empty() { return None; }
+
+        let t = input == Input::Char('\t');
+        let n = rivals.len() + if tab_off { 1 } else { 0 };
+
+        let current = prev.and_then(|x| rivals.iter().position(|y| y.0.weak.id() == x));
+        let start = current.or_else(|| if tab_off { Some(n - 1) } else { None });
+        let index = start.map(|x| if t { x + n + 1 } else { x + n - 1 } % n)
+                         .unwrap_or_else(|| if t { 0 } else { n - 1 });
+        if index < rivals.len() { Some(rivals[index].0.weak.id()) } else { None }
+    };
+
+    if input == Input::Char('\t') || input == Input::BackTab {
+        let prev = state.board.get_known(&state.player).focus;
+        state.board.set_focus(&state.player, get_tabbed_target(prev, true));
+    } else if input == Input::Escape {
+        state.board.set_focus(&state.player, None);
+    }
+
     if input == Input::Char('f') {
         state.board.log_menu("Choose a Pokemon to send out with J/K:", 0x234);
         state.choice = Some(0);
@@ -985,6 +1019,20 @@ fn update_state(state: &mut State) {
     if update {
         state.board.update_known(&state.player, &state.t);
     }
+
+    // Update the vision estimate for our target
+    let known = state.board.get_known(&state.player);
+    let focus = known.focus.and_then(|x| known.get_view_of(x));
+    if let Some(target) = focus && target.age == 0 {
+        let floor = Tile::get('.');
+        let (player, pos, dir) = (target.player, target.pos, target.dir);
+        let lookup = |p: Point| known.get_cell(p).map(|x| x.tile).unwrap_or(floor);
+        state.board.compute_vision(player, pos, dir, lookup,
+                                   &mut state.fov, &mut state.vision);
+        state.target_pos = Some(pos);
+    } else {
+        state.target_pos = None;
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -993,6 +1041,7 @@ fn update_state(state: &mut State) {
 
 const UI_COL_SPACE: i32 = 2;
 const UI_ROW_SPACE: i32 = 1;
+const UI_KEY_SPACE: i32 = 4;
 
 const UI_LOG_SIZE: i32 = 4;
 const UI_MAP_SIZE_X: i32 = 43;
@@ -1013,10 +1062,12 @@ struct UI {
 
 impl UI {
     fn new() -> Self {
+        let kl = Self::render_key('a').chars().count() as i32;
+        assert!(kl == UI_KEY_SPACE);
+
         let ss = UI_STATUS_SIZE;
         let (x, y) = (UI_MAP_SIZE_X, UI_MAP_SIZE_Y);
         let (col, row) = (UI_COL_SPACE, UI_ROW_SPACE);
-        let kl = Self::render_key('a').chars().count() as i32;
         let w = 2 * x + 2 + 2 * (ss + kl + 2 * col);
         let h = y + 2 + row + UI_LOG_SIZE + row + 1;
 
@@ -1136,6 +1187,9 @@ pub struct State {
     inputs: Vec<Input>,
     choice: Option<i32>,
     player: Trainer,
+    target_pos: Option<Point>,
+    vision: Vision, // target vision
+    fov: FOV, // target FOV helper
     t: Token,
     ui: UI,
 }
@@ -1152,7 +1206,7 @@ impl State {
         }
 
         let mut t = unsafe { Token::new() };
-        let mut player = Trainer::new(pos, true);
+        let mut player = Trainer::new(pos, true, "skishore");
         player.register_pokemon(&mut t, "Bulbasaur");
         player.register_pokemon(&mut t, "Charmander");
         player.register_pokemon(&mut t, "Squirtle");
@@ -1177,8 +1231,11 @@ impl State {
             }
         }
 
+        let target_pos = None;
+        let vision = Vision::default();
+        let fov = FOV::new(FOV_RADIUS_SMALL);
         let (input, inputs, choice, ui) = (None, vec![], None, UI::new());
-        Self { board, input, inputs, choice, player, t, ui }
+        Self { board, input, inputs, choice, player, target_pos, vision, fov, t, ui }
     }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
@@ -1188,7 +1245,7 @@ impl State {
     pub fn render(&self, buffer: &mut Buffer) {
         if buffer.data.is_empty() {
             let size = self.ui.bounds;
-            let mut overwrite = Matrix::new(size, Glyph::char(' '));
+            let mut overwrite = Matrix::new(size, ' '.into());
             std::mem::swap(buffer, &mut overwrite);
         }
         buffer.fill(buffer.default);
@@ -1215,9 +1272,28 @@ impl State {
             }
         }
 
+        if let Some(target) = self.target_pos {
+            let adjusted = pos - target + self.vision.offset;
+            let aware = self.vision.visibility.get(adjusted) >= 0;
+            let color = if aware { 0x100 } else { 0x000 };
+
+            for (i, point) in self.vision.cells_seen.iter().enumerate() {
+                let Point(x, y) = *point - offset;
+                if !(0 <= x && x < UI_MAP_SIZE_X && 0 <= y && y < UI_MAP_SIZE_Y) { continue; }
+                let point = self.ui.map.root + Point(2 * x, y);
+                let glyph = buffer.get(point);
+                if i == 0 {
+                    buffer.set(point, glyph.with_fg(Color::black()).with_bg(0x222));
+                } else {
+                    buffer.set(point, glyph.with_bg(color));
+                }
+            }
+        }
+
         self.render_log(&mut Slice::new(buffer, self.ui.log));
         self.render_rivals(known, e, &mut Slice::new(buffer, self.ui.rivals));
         self.render_status(known, e, &mut Slice::new(buffer, self.ui.status));
+        self.render_target(known, &mut Slice::new(buffer, self.ui.target));
 
         if let Some(choice) = self.choice {
             self.ui.render_dialog(buffer, &self.ui.choice);
@@ -1235,7 +1311,7 @@ impl State {
         let mut rivals = rivals(known, e, &self.t);
         rivals.truncate(max(slice.size().1, 0) as usize / 2);
 
-        for (_, pokemon) in rivals {
+        for (entity, pokemon) in rivals {
             let PSD {glyph, name, ..} = pokemon.species;
             let (hp, hp_color) = (pokemon.hp, self.hp_color(pokemon.hp));
             let hp_text = format!("{}%", max((100.0 * hp).floor() as i32, 1));
@@ -1245,12 +1321,58 @@ impl State {
             slice.newline();
             slice.write_chr(*glyph).space().write_str(name);
             slice.spaces(ss).set_fg(Some(hp_color)).write_str(&hp_text).newline();
+
+            if known.focus == Some(entity.weak.id()) {
+                let start = slice.get_cursor() - Point(0, 1);
+                let (fg, bg) = (Color::default(), Color::gray());
+                for x in 0..UI_STATUS_SIZE {
+                    let p = start + Point(x, 0);
+                    slice.set(p, Glyph::new(slice.get(p).ch(), fg, bg));
+                }
+            }
         }
     }
 
     fn render_status(&self, known: &Knowledge, e: &Trainer, slice: &mut Slice) {
-        if let Some(entity) = known.get_view_of(e) {
-            self.render_entity('a', &entity.view, slice);
+        if let Some(entity) = known.get_view_of(e.id()) {
+            self.render_entity(Some('a'), None, entity, slice);
+        }
+    }
+
+    fn render_target(&self, known: &Knowledge, slice: &mut Slice) {
+        let focus = known.focus.and_then(|x| known.get_view_of(x));
+        if focus.is_none() {
+            let fg = Some(0x111.into());
+            slice.newline();
+            slice.set_fg(fg).write_str("No target selected.").newline();
+            slice.newline();
+            slice.set_fg(fg).write_str("[x] examine your surroundings").newline();
+            return;
+        }
+
+        let target = focus.unwrap();
+        let fg = if target.age > 0 { Some(0x111.into()) } else { None };
+
+        let explanation = {
+            if target.age > 0 { "Last target: (remembered)" } else { "Last target:" }
+        };
+
+        let (text, tile) = {
+            let text = if target.age > 0 { "Stood on: " } else { "Standing on: " };
+            let tile = known.get_cell(target.pos).map(|x| x.tile);
+            (text, tile)
+        };
+
+        slice.newline();
+        slice.set_fg(fg).write_str(explanation).newline();
+        self.render_entity(None, fg, target, slice);
+
+        slice.set_fg(fg).write_str(text);
+        if let Some(x) = tile {
+            slice.write_chr(x.glyph).space();
+            slice.write_chr('(').write_str(x.description).write_chr(')').newline();
+        } else {
+            slice.write_str("(unseen location)").newline();
         }
     }
 
@@ -1288,7 +1410,7 @@ impl State {
         let fg = if out == 0 && hp > 0. { None } else { Some(0x111.into()) };
 
         let x = if selected { 1 } else { 0 };
-        let arrow = Glyph::char(if selected { '>' } else { ' ' });
+        let arrow = if selected { '>' } else { ' ' };
 
         let prefix = UI::render_key(key);
         let n = prefix.chars().count() + (UI_COL_SPACE + 1) as usize;
@@ -1307,25 +1429,28 @@ impl State {
         slice.newline();
     }
 
-    fn render_entity(&self, key: char, view: &EntityView, slice: &mut Slice) {
-        let prefix = UI::render_key(key);
+    fn render_entity(&self, key: Option<char>, fg: Option<Color>,
+                     entity: &EntityKnowledge, slice: &mut Slice) {
+        let prefix = key.map(|x| UI::render_key(x)).unwrap_or(String::default());
         let n = prefix.chars().count();
-        let w = slice.size().0 - (n as i32) - 6;
+        let w = UI_STATUS_SIZE - 6;
         let status_bar_line = |p: &str, v: f64, c: Color, s: &mut Slice| {
-            self.render_bar(v, c, w, s.spaces(n).write_str(p));
+            self.render_bar(v, c, w, s.set_fg(fg).spaces(n).write_str(p));
             s.newline();
         };
 
         slice.newline();
-        slice.write_str(&prefix).write_str("You").newline();
-        match view {
+        match &entity.view {
             EntityView::Pokemon(x) => {
                 let (hp_color, pp_color) = (self.hp_color(x.hp), 0x123.into());
+                slice.set_fg(fg).write_str(&prefix).write_str(x.species.name).newline();
                 status_bar_line("HP: ", x.hp, hp_color, slice);
                 status_bar_line("PP: ", x.pp, pp_color, slice);
             }
             EntityView::Trainer(x) => {
                 let hp_color = self.hp_color(x.hp);
+                let name = if entity.player { "You" } else { &x.name };
+                slice.set_fg(fg).write_str(&prefix).write_str(name).newline();
                 status_bar_line("HP: ", x.hp, hp_color, slice);
             }
         }
@@ -1335,12 +1460,11 @@ impl State {
     fn render_bar<'a>(&self, value: f64, color: Color, width: i32, slice: &mut Slice) {
         let count = if value > 0. { max(1, (width as f64 * value) as i32) } else { 0 };
         let glyph = Glyph::chfg('=', color);
-        let empty = Glyph::char(' ');
 
-        slice.write_chr(Glyph::char('['));
+        slice.write_chr('[');
         for _ in 0..count { slice.write_chr(glyph); }
-        for _ in count..width { slice.write_chr(empty); }
-        slice.write_chr(Glyph::char(']'));
+        for _ in count..width { slice.write_chr(' '); }
+        slice.write_chr(']');
     }
 
     fn hp_color(&self, hp: f64) -> Color {
