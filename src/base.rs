@@ -179,6 +179,8 @@ pub struct Slice<'a> {
     buffer: &'a mut Buffer,
     bounds: Rect,
     cursor: Point,
+    fg: Option<Color>,
+    bg: Option<Color>,
 }
 
 impl<'a> From<&'a mut Buffer> for Slice<'a> {
@@ -190,7 +192,7 @@ impl<'a> From<&'a mut Buffer> for Slice<'a> {
 
 impl<'a> Slice<'a> {
     pub fn new(buffer: &'a mut Buffer, bounds: Rect) -> Self {
-        Self { buffer, bounds, cursor: Point::default() }
+        Self { buffer, bounds, cursor: Point::default(), fg: None, bg: None }
     }
 
     // Basic API
@@ -202,6 +204,8 @@ impl<'a> Slice<'a> {
 
     pub fn set(&mut self, point: Point, glyph: Glyph) {
         if !self.contains(point) { return; }
+        let glyph = self.fg.map(|x| glyph.with_fg(x)).unwrap_or(glyph);
+        let glyph = self.bg.map(|x| glyph.with_bg(x)).unwrap_or(glyph);
         self.buffer.set(self.bounds.root + point, glyph);
     }
 
@@ -211,19 +215,17 @@ impl<'a> Slice<'a> {
         0 <= px && px < sx && 0 <= py && py < sy
     }
 
-    // Cursor API
+    pub fn size(&self) -> Point { self.bounds.size }
 
-    pub fn move_cursor(&mut self, cursor: Point) -> &mut Self {
-        self.cursor = cursor;
-        self
-    }
+    // Cursor API
 
     pub fn newline(&mut self) -> &mut Self {
         self.newlines(1)
     }
 
     pub fn newlines(&mut self, n: usize) -> &mut Self {
-        self.move_cursor(Point(0, self.cursor.1 + n as i32))
+        self.cursor = Point(0, self.cursor.1 + n as i32);
+        self.set_fg(None).set_bg(None)
     }
 
     pub fn space(&mut self) -> &mut Self {
@@ -244,6 +246,10 @@ impl<'a> Slice<'a> {
         text.chars().for_each(|x| { self.write_chr(Glyph::char(x)); });
         self
     }
+
+    pub fn set_fg(&mut self, c: Option<Color>) -> &mut Self { self.fg = c; self }
+
+    pub fn set_bg(&mut self, c: Option<Color>) -> &mut Self { self.bg = c; self }
 }
 
 //////////////////////////////////////////////////////////////////////////////

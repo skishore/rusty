@@ -9,7 +9,8 @@ use crate::assert_eq_size;
 use crate::base::{Buffer, Color, Glyph, Slice};
 use crate::base::{FOV, HashMap, Matrix, Point, Rect, clamp};
 use crate::entity::{AIState, Assess, Fight, Flight, Wander};
-use crate::entity::{Pokemon, PokemonEdge, PokemonSpeciesData};
+use crate::entity::{Pokemon, PokemonEdge};
+use crate::entity::{PokemonIndividualData as PID, PokemonSpeciesData as PSD};
 use crate::entity::{Entity, ET, Token, Trainer, WeakEntity};
 use crate::pathing::{AStar, DijkstraMap, DijkstraMode};
 use crate::pathing::{DIRECTIONS, BFS, BFSResult, Status};
@@ -85,7 +86,7 @@ lazy_static! {
 //////////////////////////////////////////////////////////////////////////////
 
 struct PokemonView {
-    species: &'static PokemonSpeciesData,
+    species: &'static PSD,
     hp: f64,
     pp: f64,
 }
@@ -103,14 +104,20 @@ impl Default for EntityView {
     fn default() -> Self { Self::Trainer(TrainerView { hp: 0. }) }
 }
 
+fn get_hp(me: &PID) -> f64 {
+    me.cur_hp as f64 / max(me.max_hp, 1) as f64
+}
+
+fn get_pp(e: &Entity, t: &Token) -> f64 {
+    1. - clamp(e.base(t).move_timer as f64 / MOVE_TIMER as f64, 0., 1.)
+}
+
 fn get_view(e: &Entity, t: &Token) -> EntityView {
     match e.test(t) {
         ET::Pokemon(x) => {
-            let base = x.base(t);
-            let me = &x.data(t).me;
-            let hp = me.cur_hp as f64 / max(me.max_hp, 1) as f64;
-            let pp = 1. - clamp(base.move_timer as f64 / MOVE_TIMER as f64, 0., 1.);
-            EntityView::Pokemon(PokemonView { species: me.species, hp, pp })
+            let species = x.data(t).me.species;
+            let (hp, pp) = (get_hp(&x.data(t).me), get_pp(e, t));
+            EntityView::Pokemon(PokemonView { species, hp, pp })
         }
         ET::Trainer(x) => {
             let data = &x.data(t);
@@ -335,12 +342,19 @@ struct BaseBoard {
     entities: Vec<Entity>,
 }
 
+struct LogLine {
+    color: Color,
+    menu: bool,
+    text: String,
+}
+
 struct Board {
     base: BaseBoard,
     fov_large: FOV,
     fov_small: FOV,
     vision: Vision,
     known: HashMap<usize, Box<Knowledge>>,
+    logs: Vec<LogLine>,
 }
 
 impl Deref for Board {
@@ -437,7 +451,25 @@ impl Board {
             fov_small: FOV::new(FOV_RADIUS_SMALL),
             vision: Vision::default(),
             known: HashMap::default(),
+            logs: vec![],
         }
+    }
+
+    // Logging
+
+    fn log<S: Into<String>>(&mut self, text: S) {
+        self.log_color(text, Color::default());
+    }
+
+    fn log_color<S: Into<String>, T: Into<Color>>(&mut self, text: S, color: T) {
+        self.logs.push(LogLine { color: color.into(), menu: false, text: text.into() });
+        if self.logs.len() as i32 > UI_LOG_SIZE { self.logs.remove(0); }
+    }
+
+    fn log_menu<S: Into<String>, T: Into<Color>>(&mut self, text: S, color: T) {
+        if self.logs.last().map(|x| x.menu).unwrap_or(false) { self.logs.pop(); }
+        self.logs.push(LogLine { color: color.into(), menu: true, text: text.into() });
+        if self.logs.len() as i32 > UI_LOG_SIZE { self.logs.remove(0); }
     }
 
     // Knowledge
@@ -640,7 +672,7 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
     entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
 }
 
-fn species(e: &Entity, t: &Token) -> Option<&'static PokemonSpeciesData> {
+fn species(e: &Entity, t: &Token) -> Option<&'static PSD> {
     match e.test(t) {
         ET::Pokemon(x) => Some(x.data(t).me.species),
         ET::Trainer(_) => None,
@@ -856,6 +888,30 @@ fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
 }
 
 fn process_input(state: &mut State, input: Input) {
+    if let Some(x) = &mut state.choice {
+        let count = state.player.data(&state.t).pokemon.len() as i32;
+        let direction = match input {
+            Input::Char('j') => 1,
+            Input::Char('k') => -1,
+            _ => 0,
+        };
+        if direction != 0 {
+            *x += direction;
+            if *x >= count { *x = 0; }
+            if *x < 0 { *x = max(count - 1, 0); }
+        } else if input == Input::Escape {
+            state.board.log_menu("Canceled.", 0x234);
+            state.choice = None;
+        }
+        return;
+    }
+
+    if input == Input::Char('f') {
+        state.board.log_menu("Choose a Pokemon to send out with J/K:", 0x234);
+        state.choice = Some(0);
+        return;
+    }
+
     let dir = match input {
         Input::Char('h') => Some(Point(-1,  0)),
         Input::Char('j') => Some(Point( 0,  1)),
@@ -924,12 +980,14 @@ const UI_ROW_SPACE: i32 = 1;
 const UI_LOG_SIZE: i32 = 4;
 const UI_MAP_SIZE_X: i32 = 43;
 const UI_MAP_SIZE_Y: i32 = 43;
+const UI_CHOICE_SIZE: i32 = 40;
 const UI_STATUS_SIZE: i32 = 30;
 const UI_COLOR: i32 = 0x430;
 
 struct UI {
     log: Rect,
     map: Rect,
+    choice: Rect,
     rivals: Rect,
     status: Rect,
     target: Rect,
@@ -957,16 +1015,29 @@ impl UI {
             root: Point(map.root.0 + map.size.0 + col + 1, status.root.1),
             size: Point(ss + kl, 9),
         };
-        let rivals_root_y = target.root.1 + target.size.1 + 2 * row + 1;
-        let rivals = Rect {
-            root: Point(target.root.0, rivals_root_y),
-            size: Point(ss + kl, status.root.1 + status.size.1 - rivals_root_y),
-        };
         let log = Rect {
             root: Point(0, map.root.1 + map.size.1 + row + 1),
             size: Point(w, UI_LOG_SIZE),
         };
-        Self { log, map, rivals, status, target, bounds: Point(w, h) }
+
+        let (cw, ch) = (UI_CHOICE_SIZE, 6 * 5);
+        let mut choice = Rect {
+            root: Point((w - cw) / 2, (h - ch) / 2),
+            size: Point(cw, ch),
+        };
+        if map.root.0 % 2 == choice.root.0 % 2 {
+            choice.root.0 -= 1;
+            choice.size.0 += 2;
+        }
+        if choice.size.0 % 2 != 0 { choice.size.0 += 1; }
+
+        let ry = target.root.1 + target.size.1 + 2 * row + 1;
+        let rivals = Rect {
+            root: Point(target.root.0, ry),
+            size: Point(ss + kl, status.root.1 + status.size.1 - ry),
+        };
+
+        Self { log, map, choice, rivals, status, target, bounds: Point(w, h) }
     }
 
     fn render_bar(&self, buffer: &mut Buffer, width: i32, pos: Point, text: &str) {
@@ -1006,6 +1077,15 @@ impl UI {
         }
     }
 
+    fn render_dialog(&self, buffer: &mut Buffer, rect: &Rect) {
+        for x in 0..rect.size.0 {
+            for y in 0..rect.size.1 {
+                buffer.set(rect.root + Point(x, y), buffer.default);
+            }
+        }
+        self.render_box(buffer, rect);
+    }
+
     fn render_frame(&self, buffer: &mut Buffer) {
         let ml = self.map.root.0 - 1;
         let mw = self.map.size.0 + 2;
@@ -1037,6 +1117,7 @@ pub struct State {
     board: Board,
     input: Option<Action>,
     inputs: Vec<Input>,
+    choice: Option<i32>,
     player: Trainer,
     t: Token,
     ui: UI,
@@ -1079,7 +1160,8 @@ impl State {
             }
         }
 
-        Self { board, input: None, inputs: vec![], player, t, ui: UI::new() }
+        let (input, inputs, choice, ui) = (None, vec![], None, UI::new());
+        Self { board, input, inputs, choice, player, t, ui }
     }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
@@ -1101,8 +1183,6 @@ impl State {
         let offset = pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
         let unseen = Glyph::wide(' ');
 
-        self.render_status(known, e, &mut Slice::new(buffer, self.ui.status));
-
         for y in 0..UI_MAP_SIZE_Y {
             for x in 0..UI_MAP_SIZE_X {
                 let point = Point(x, y);
@@ -1117,24 +1197,92 @@ impl State {
                 buffer.set(self.ui.map.root + Point(2 * x, y), glyph);
             }
         }
+
+        self.render_log(&mut Slice::new(buffer, self.ui.log));
+        self.render_status(known, e, &mut Slice::new(buffer, self.ui.status));
+
+        if let Some(choice) = self.choice {
+            self.ui.render_dialog(buffer, &self.ui.choice);
+            self.render_choice(e, choice, &mut Slice::new(buffer, self.ui.choice));
+        }
+    }
+
+    fn render_log(&self, slice: &mut Slice) {
+        for line in &self.board.logs {
+            slice.set_fg(Some(line.color)).write_str(&line.text);
+        }
     }
 
     fn render_status(&self, known: &Knowledge, e: &Trainer, slice: &mut Slice) {
         if let Some(entity) = known.get_view_of(e) {
-            self.render_entity(UI::render_key('a'), &entity.view, slice);
+            self.render_entity('a', &entity.view, slice);
         }
     }
 
-    fn render_entity(&self, prefix: String, view: &EntityView, slice: &mut Slice) {
-        slice.newline();
-        slice.write_str(&prefix).write_str("You").newline();
+    fn render_choice(&self, e: &Trainer, choice: i32, slice: &mut Slice) {
+        let options = &e.data(&self.t).pokemon;
+        let keys = ['a', 's', 'd', 'f', 'g', 'h'];
+        for (i, key) in keys.iter().enumerate() {
+            let selected = choice == i as i32;
+            match if i < options.len() { Some(&options[i]) } else { None } {
+                Some(PokemonEdge::Out(x)) => {
+                    let (me, pp) = (&*x.data(&self.t).me, get_pp(e, &self.t));
+                    self.render_option(*key, 1, selected, me, pp, slice);
+                },
+                Some(PokemonEdge::In(x)) =>
+                    self.render_option(*key, 0, selected, x, 1.0, slice),
+                None => self.render_empty_option(*key, slice),
+            }
+        }
+    }
 
-        let n = prefix.chars().count();
+    fn render_empty_option(&self, key: char, slice: &mut Slice) {
+        let fg = Some(0x111.into());
+        let mut prefix = (0..UI_COL_SPACE + 1).map(|_| ' ').collect::<String>();
+        prefix.push_str(&UI::render_key(key));
+
+        slice.newline();
+        slice.set_fg(fg).write_str(&prefix).write_str("---").newline();
+        slice.newline().newline().newline();
+    }
+
+    fn render_option(&self, key: char, out: i32, selected: bool,
+                     option: &PID, pp: f64, slice: &mut Slice) {
+        let hp = get_hp(option);
+        let (hp_color, pp_color) = (self.hp_color(hp), 0x123.into());
+        let fg = if out == 0 && hp > 0. { None } else { Some(0x111.into()) };
+
+        let x = if selected { 1 } else { 0 } as usize;
+        let arrow = Glyph::char(if selected { '>' } else { ' ' });
+
+        let prefix = UI::render_key(key);
+        let n = prefix.chars().count() + (UI_COL_SPACE + 1) as usize;
+        let w = slice.size().0 - (n as i32) - 2 * UI_COL_SPACE - 6;
         let status_bar_line = |p: &str, v: f64, c: Color, s: &mut Slice| {
-            self.render_bar(v, c, s.spaces(n).write_str(p));
+            s.set_fg(fg).spaces(n + x).write_str(p);
+            self.render_bar(v, c, w, s);
             s.newline();
         };
 
+        slice.newline();
+        slice.spaces(UI_COL_SPACE as usize).write_chr(arrow).spaces(x);
+        slice.set_fg(fg).write_str(&prefix).write_str(option.species.name).newline();
+        status_bar_line("HP: ", hp, hp_color, slice);
+        status_bar_line("PP: ", pp, pp_color, slice);
+        slice.newline();
+    }
+
+    fn render_entity(&self, key: char, view: &EntityView, slice: &mut Slice) {
+        let prefix = UI::render_key(key);
+        let n = prefix.chars().count();
+        let w = slice.size().0 - (n as i32) - 6;
+        let status_bar_line = |p: &str, v: f64, c: Color, s: &mut Slice| {
+            self.render_bar(v, c, w, s.spaces(n).write_str(p));
+            s.newline();
+        };
+
+        slice.newline();
+        slice.write_str(&prefix).write_str("You").newline();
         match view {
             EntityView::Pokemon(x) => {
                 let (hp_color, pp_color) = (self.hp_color(x.hp), 0x123.into());
@@ -1149,15 +1297,14 @@ impl State {
         slice.newline();
     }
 
-    fn render_bar<'a>(&self, value: f64, color: Color, slice: &mut Slice) {
-        let total = UI_STATUS_SIZE - 6;
-        let count = if value > 0. { max(1, (total as f64 * value) as i32) } else { 0 };
+    fn render_bar<'a>(&self, value: f64, color: Color, width: i32, slice: &mut Slice) {
+        let count = if value > 0. { max(1, (width as f64 * value) as i32) } else { 0 };
         let glyph = Glyph::chfg('=', color);
         let empty = Glyph::char(' ');
 
         slice.write_chr(Glyph::char('['));
         for _ in 0..count { slice.write_chr(glyph); }
-        for _ in count..total { slice.write_chr(empty); }
+        for _ in count..width { slice.write_chr(empty); }
         slice.write_chr(Glyph::char(']'));
     }
 
