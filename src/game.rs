@@ -87,6 +87,7 @@ lazy_static! {
 
 struct PokemonView {
     species: &'static PSD,
+    trainer: bool,
     hp: f64,
     pp: f64,
 }
@@ -116,8 +117,9 @@ fn get_view(e: &Entity, t: &Token) -> EntityView {
     match e.test(t) {
         ET::Pokemon(x) => {
             let species = x.data(t).me.species;
+            let trainer = x.data(t).me.trainer.is_some();
             let (hp, pp) = (get_hp(&x.data(t).me), get_pp(e, t));
-            EntityView::Pokemon(PokemonView { species, hp, pp })
+            EntityView::Pokemon(PokemonView { species, trainer, hp, pp })
         }
         ET::Trainer(x) => {
             let data = &x.data(t);
@@ -151,7 +153,7 @@ struct EntityKnowledge {
     weak: WeakEntity,
     view: EntityView,
 }
-assert_eq_size!(EntityKnowledge, 56);
+assert_eq_size!(EntityKnowledge, 64);
 
 #[derive(Default)]
 struct Knowledge {
@@ -670,6 +672,21 @@ fn wait(e: &Entity, t: &mut Token, result: &ActionResult) {
     let entity = e.base_mut(t);
     entity.move_timer += (MOVE_TIMER as f64 * result.moves).round() as i32;
     entity.turn_timer += (TURN_TIMER as f64 * result.turns).round() as i32;
+}
+
+fn rivals<'a>(known: &'a Knowledge, e: &Trainer, t: &Token)
+        -> Vec<(&'a EntityKnowledge, &'a PokemonView)> {
+    let mut rivals = vec![];
+    for entity in &known.entities {
+        if entity.age > 0 { continue; }
+        if let EntityView::Pokemon(x) = &entity.view && !x.trainer {
+            rivals.push((entity, x));
+        }
+    }
+    let pos = e.base(t).pos;
+    rivals.sort_by_cached_key(
+        |(x, _)| ((x.pos - pos).len_l2_squared(), x.pos.0, x.pos.1));
+    rivals
 }
 
 fn species(e: &Entity, t: &Token) -> Option<&'static PSD> {
@@ -1199,6 +1216,7 @@ impl State {
         }
 
         self.render_log(&mut Slice::new(buffer, self.ui.log));
+        self.render_rivals(known, e, &mut Slice::new(buffer, self.ui.rivals));
         self.render_status(known, e, &mut Slice::new(buffer, self.ui.status));
 
         if let Some(choice) = self.choice {
@@ -1210,6 +1228,23 @@ impl State {
     fn render_log(&self, slice: &mut Slice) {
         for line in &self.board.logs {
             slice.set_fg(Some(line.color)).write_str(&line.text);
+        }
+    }
+
+    fn render_rivals(&self, known: &Knowledge, e: &Trainer, slice: &mut Slice) {
+        let mut rivals = rivals(known, e, &self.t);
+        rivals.truncate(max(slice.size().1, 0) as usize / 2);
+
+        for (_, pokemon) in rivals {
+            let PSD {glyph, name, ..} = pokemon.species;
+            let (hp, hp_color) = (pokemon.hp, self.hp_color(pokemon.hp));
+            let hp_text = format!("{}%", max((100.0 * hp).floor() as i32, 1));
+            let (sn, sh) = (name.chars().count(), hp_text.chars().count());
+            let ss = max(16 - sn as i32 - sh as i32, 0) as usize;
+
+            slice.newline();
+            slice.write_chr(*glyph).space().write_str(name);
+            slice.spaces(ss).set_fg(Some(hp_color)).write_str(&hp_text).newline();
         }
     }
 
@@ -1252,7 +1287,7 @@ impl State {
         let (hp_color, pp_color) = (self.hp_color(hp), 0x123.into());
         let fg = if out == 0 && hp > 0. { None } else { Some(0x111.into()) };
 
-        let x = if selected { 1 } else { 0 } as usize;
+        let x = if selected { 1 } else { 0 };
         let arrow = Glyph::char(if selected { '>' } else { ' ' });
 
         let prefix = UI::render_key(key);

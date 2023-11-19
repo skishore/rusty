@@ -128,7 +128,7 @@ impl Screen {
             Ok(2)
         } else {
             write!(self.output, "{}", char::from_u32(ch.0 as u32).unwrap())?;
-            Ok(if ch.0 <= 0xff00 { 1 } else { 2 })
+            Ok(if ch.is_wide() { 2 } else { 1 })
         }
     }
 

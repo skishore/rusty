@@ -22,6 +22,10 @@ pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 pub struct Char(pub u16);
 assert_eq_size!(Char, 2);
 
+impl Char {
+    pub fn is_wide(&self) -> bool { self.0 >= 0xff00 }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Color(pub u8);
 assert_eq_size!(Color, 1);
@@ -239,7 +243,7 @@ impl<'a> Slice<'a> {
 
     pub fn write_chr(&mut self, glyph: Glyph) -> &mut Self {
         self.set(self.cursor, glyph);
-        self.space()
+        self.spaces(if glyph.ch().is_wide() { 2 } else { 1 })
     }
 
     pub fn write_str(&mut self, text: &str) -> &mut Self {
