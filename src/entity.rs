@@ -108,7 +108,7 @@ pub struct PokemonIndividualData {
 }
 
 pub struct PokemonData {
-    pub ai: AIState,
+    pub ai: std::cell::Cell<Option<Box<AIState>>>,
     pub me: Box<PokemonIndividualData>,
 }
 
@@ -142,7 +142,7 @@ fn individual(species: &str, trainer: Option<Trainer>) -> Box<PokemonIndividualD
 
 fn pokemon(pos: Point, dir: Point, species: &str, trainer: Option<Trainer>) -> EntityRepr {
     let data = PokemonData {
-        ai: AIState::default(),
+        ai: std::cell::Cell::default(),
         me: individual(species, trainer),
     };
     let base = EntityData {

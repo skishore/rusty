@@ -715,7 +715,7 @@ fn trainer(e: &Entity, t: &Token) -> Option<Trainer> {
     }
 }
 
-fn explore_near(known: &Knowledge, e: &Entity, t: &mut Token,
+fn explore_near(known: &Knowledge, e: &Entity, t: &Token,
                 source: Point, age: i32, turns: f64) -> Action {
     let pos = e.base(t).pos;
     let check = |p: Point| {
@@ -772,7 +772,7 @@ fn assess(_: &Knowledge, e: &Entity, t: &Token, s: &mut Assess) -> Action {
     Action::Look(Point(rx as i32, ry as i32))
 }
 
-fn flight(known: &Knowledge, e: &Entity, t: &mut Token,
+fn flight(known: &Knowledge, e: &Entity, t: &Token,
           source: Point) -> Option<Action> {
     let mut map: HashMap<Point, i32> = HashMap::default();
     map.insert(source, 0);
@@ -811,10 +811,8 @@ fn flight(known: &Knowledge, e: &Entity, t: &mut Token,
     Some(Action::Move(MoveData { dir: *sample(&best_steps), turns: 1.5 }))
 }
 
-fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
-    let mut ai = AIState::default();
-    std::mem::swap(&mut ai, &mut e.data_mut(t).ai);
-
+fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &Token) -> Action {
+    let mut ai = e.data(t).ai.take().unwrap_or(Box::default());
     let prey = e.data(t).me.species.name == "Pidgey";
     let mut targets: Vec<(i32, Point)> = vec![];
     for entity in known.entities.iter() {
@@ -826,39 +824,39 @@ fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
         let (age, target) = targets[0];
 
         if prey {
-            let switch = match &ai {
+            let switch = match ai.as_ref() {
                 AIState::Flight(x) => x.switch,
                 AIState::Assess(x) => x.switch,
                 _ => MIN_FLIGHT_TIME,
             };
-            let flight = matches!(ai, AIState::Flight(_));
+            let flight = matches!(*ai, AIState::Flight(_));
             if age >= switch && flight {
-                ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME });
+                *ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME });
             } else if age < switch && !flight {
                 let switch = clamp(2 * switch, MIN_FLIGHT_TIME, MAX_FLIGHT_TIME);
-                ai = AIState::Flight(Flight { age, switch, target });
+                *ai = AIState::Flight(Flight { age, switch, target });
             }
-            if let AIState::Flight(x) = &mut ai {
+            if let AIState::Flight(x) = ai.as_mut() {
                 (x.age, x.target) = (age, target);
             }
-        } else if age < MAX_FOLLOW_TIME || matches!(ai, AIState::Fight(_)) {
-            ai = AIState::Fight(Fight { age, target });
+        } else if age < MAX_FOLLOW_TIME || matches!(*ai, AIState::Fight(_)) {
+            *ai = AIState::Fight(Fight { age, target });
         }
     }
-    if let AIState::Fight(x) = &ai && x.age >= MAX_FOLLOW_TIME {
+    if let AIState::Fight(x) = ai.as_ref() && x.age >= MAX_FOLLOW_TIME {
         let (switch, target) = (MIN_FLIGHT_TIME, x.target);
-        ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME })
+        *ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME })
     }
-    if let AIState::Wander(x) = &ai && x.time <= 0 {
+    if let AIState::Wander(x) = ai.as_ref() && x.time <= 0 {
         let (switch, target) = (MIN_FLIGHT_TIME, e.base(t).pos + e.base(t).dir);
-        ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME })
+        *ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME })
     }
-    if let AIState::Assess(x) = &ai && x.time <= 0 {
-        ai = AIState::Wander(Wander { time: random::<i32>().rem_euclid(16) });
+    if let AIState::Assess(x) = ai.as_ref() && x.time <= 0 {
+        *ai = AIState::Wander(Wander { time: random::<i32>().rem_euclid(16) });
     }
 
     let mut replacement = None;
-    let action = match &mut ai {
+    let action = match ai.as_mut() {
         AIState::Fight(x) => if x.age == 0 {
             Action::Look(x.target - e.base(t).pos)
         } else {
@@ -877,15 +875,15 @@ fn plan_pokemon(known: &Knowledge, e: &Pokemon, t: &mut Token) -> Action {
         }
         AIState::Assess(ref mut x) => assess(known, e, t, x),
     };
-    if let Some(x) = replacement { ai = x; }
-    std::mem::swap(&mut ai, &mut e.data_mut(t).ai);
+    if let Some(x) = replacement { *ai = x; }
+    e.data(t).ai.set(Some(ai));
     action
 }
 
-fn plan(known: &Knowledge, e: &Entity, t: &mut Token, input: &mut Option<Action>) -> Action {
+fn plan(known: &Knowledge, e: &Entity, t: &Token, input: &mut Action) -> Action {
     let entity = e.base(t);
     if entity.player {
-        return input.take().unwrap_or(Action::WaitForInput)
+        return std::mem::replace(input, Action::WaitForInput);
     }
     match e.test(t) {
         ET::Pokemon(x) => plan_pokemon(known, x, t),
@@ -975,7 +973,8 @@ fn process_input(state: &mut State, input: Input) {
         Input::Char('.') => Some(Point( 0,  0)),
         _ => None,
     };
-    state.input = dir.map(|x| Action::Move(MoveData { dir: x, turns: 1. }));
+    state.input = dir.map(|x| Action::Move(MoveData { dir: x, turns: 1. }))
+                     .unwrap_or(Action::WaitForInput);
 }
 
 fn update_state(state: &mut State) {
@@ -984,7 +983,7 @@ fn update_state(state: &mut State) {
     };
 
     let needs_input = |state: &State| {
-        if state.input.is_some() { return false; }
+        if !matches!(state.input, Action::WaitForInput) { return false; }
         let active = state.board.get_active_entity();
         if active != state.player.deref() { return false; }
         player_alive(state)
@@ -1008,7 +1007,7 @@ fn update_state(state: &mut State) {
 
         let entity = entity.clone();
         let known = state.board.update_known(&entity, &state.t);
-        let action = plan(known, &entity, &mut state.t, &mut state.input);
+        let action = plan(known, &entity, &state.t, &mut state.input);
 
         let result = act(state, &entity, action);
         if entity.base(&state.t).player && !result.success { break; }
@@ -1025,13 +1024,13 @@ fn update_state(state: &mut State) {
     let focus = known.focus.and_then(|x| known.get_view_of(x));
     if let Some(target) = focus && target.age == 0 {
         let floor = Tile::get('.');
+        let Focus { fov, vision, .. } = &mut state.focus;
         let (player, pos, dir) = (target.player, target.pos, target.dir);
         let lookup = |p: Point| known.get_cell(p).map(|x| x.tile).unwrap_or(floor);
-        state.board.compute_vision(player, pos, dir, lookup,
-                                   &mut state.fov, &mut state.vision);
-        state.target_pos = Some(pos);
+        state.board.compute_vision(player, pos, dir, lookup, fov, vision);
+        state.focus.target = Some(pos);
     } else {
-        state.target_pos = None;
+        state.focus.target = None;
     }
 }
 
@@ -1060,8 +1059,8 @@ struct UI {
     bounds: Point,
 }
 
-impl UI {
-    fn new() -> Self {
+impl Default for UI {
+    fn default() -> Self {
         let kl = Self::render_key('a').chars().count() as i32;
         assert!(kl == UI_KEY_SPACE);
 
@@ -1107,7 +1106,9 @@ impl UI {
 
         Self { log, map, choice, rivals, status, target, bounds: Point(w, h) }
     }
+}
 
+impl UI {
     fn render_bar(&self, buffer: &mut Buffer, width: i32, pos: Point, text: &str) {
         let shift = 2;
         let color: Color = UI_COLOR.into();
@@ -1181,15 +1182,19 @@ impl UI {
 
 // State
 
+struct Focus {
+    fov: FOV,
+    vision: Vision,
+    target: Option<Point>,
+}
+
 pub struct State {
     board: Board,
-    input: Option<Action>,
+    focus: Focus,
+    input: Action,
     inputs: Vec<Input>,
     choice: Option<i32>,
     player: Trainer,
-    target_pos: Option<Point>,
-    vision: Vision, // target vision
-    fov: FOV, // target FOV helper
     t: Token,
     ui: UI,
 }
@@ -1231,11 +1236,20 @@ impl State {
             }
         }
 
-        let target_pos = None;
-        let vision = Vision::default();
-        let fov = FOV::new(FOV_RADIUS_SMALL);
-        let (input, inputs, choice, ui) = (None, vec![], None, UI::new());
-        Self { board, input, inputs, choice, player, target_pos, vision, fov, t, ui }
+        Self {
+            board,
+            focus: Focus {
+                fov: FOV::new(FOV_RADIUS_SMALL),
+                vision: Vision::default(),
+                target: None,
+            },
+            ui: UI::default(),
+            input: Action::WaitForInput,
+            inputs: vec![],
+            choice: None,
+            player,
+            t,
+        }
     }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
@@ -1272,12 +1286,12 @@ impl State {
             }
         }
 
-        if let Some(target) = self.target_pos {
-            let adjusted = pos - target + self.vision.offset;
-            let aware = self.vision.visibility.get(adjusted) >= 0;
+        if let Some(target) = self.focus.target {
+            let adjusted = pos - target + self.focus.vision.offset;
+            let aware = self.focus.vision.visibility.get(adjusted) >= 0;
             let color = if aware { 0x100 } else { 0x000 };
 
-            for (i, point) in self.vision.cells_seen.iter().enumerate() {
+            for (i, point) in self.focus.vision.cells_seen.iter().enumerate() {
                 let Point(x, y) = *point - offset;
                 if !(0 <= x && x < UI_MAP_SIZE_X && 0 <= y && y < UI_MAP_SIZE_Y) { continue; }
                 let point = self.ui.map.root + Point(2 * x, y);
