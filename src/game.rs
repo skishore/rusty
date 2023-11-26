@@ -8,7 +8,7 @@ use rand::random;
 
 use crate::assert_eq_size;
 use crate::base::{Buffer, Color, Glyph, Slice};
-use crate::base::{FOV, HashMap, Matrix, Point, Rect, clamp};
+use crate::base::{FOV, HashMap, LOS, Matrix, Point, Rect, clamp};
 use crate::entity::{AIState, Assess, Fight, Flight, Wander};
 use crate::entity::{Pokemon, PokemonEdge};
 use crate::entity::{PokemonIndividualData as PID, PokemonSpeciesData as PSD};
@@ -154,6 +154,7 @@ struct EntityKnowledge {
     glyph: Glyph,
     moved: bool,
     rival: bool,
+    friend: bool,
     player: bool,
     weak: WeakEntity,
     view: EntityView,
@@ -175,6 +176,10 @@ impl Knowledge {
 
     fn get_entity(&self, cell: &CellKnowledge) -> Option<&EntityKnowledge> {
         cell.eid.map(|eid| self._entity_raw(eid))
+    }
+
+    fn get_entity_at(&self, p: Point) -> Option<&EntityKnowledge> {
+        self.get_entity(self.get_cell(p)?)
     }
 
     fn get_status(&self, p: Point) -> Option<Status> {
@@ -217,6 +222,7 @@ impl Knowledge {
     fn update(&mut self, board: &BaseBoard, e: &Entity, t: &Token, vision: &Vision) {
         let my_entity = e.base(t);
         let my_species = species(e, t);
+        let my_trainer = trainer(e, t);
         self._forget(my_entity.player);
         let offset = vision.offset - my_entity.pos;
 
@@ -249,6 +255,8 @@ impl Knowledge {
                 entry.moved = false;
                 entry.glyph = entity.base(t).glyph;
                 entry.rival = species.is_some() && species != my_species;
+                entry.friend = trainer(entity, t) == my_trainer;
+                entry.player = entity.base(t).player;
                 entry.view = get_view(entity, t);
 
                 Some(eid)
@@ -641,6 +649,82 @@ fn mapgen(map: &mut Matrix<&'static Tile>) {
 
 //////////////////////////////////////////////////////////////////////////////
 
+// Targeting UI
+
+fn can_target(entity: &EntityKnowledge) -> bool {
+    entity.age == 0 && !entity.friend
+}
+
+fn init_target(data: TargetData, source: Point, target: Point) -> Box<Target> {
+    Box::new(Target { data, error: "".into(), frame: 0, path: vec![], source, target })
+}
+
+fn outside_map(state: &State, point: Point) -> bool {
+    let delta = point - state.player.base(&state.t).pos;
+    let limit_x = (UI_MAP_SIZE_X - 1) / 2;
+    let limit_y = (UI_MAP_SIZE_Y - 1) / 2;
+    delta.0.abs() > limit_x || delta.1.abs() > limit_y
+}
+
+fn update_target(state: &mut State, update: Point) {
+    if state.target.is_none() { return; }
+    let target = state.target.as_mut().unwrap();
+
+    let mut okay_until = 0;
+    let known = state.board.get_known(&state.player);
+    let los = LOS(target.source, update);
+
+    target.error = "".into();
+    target.frame = 0;
+    target.path = los.into_iter().skip(1).map(|x| (x, true)).collect();
+    target.target = update;
+
+    match &target.data {
+        TargetData::FarLook => {
+            for (i, x) in target.path.iter().enumerate() {
+                if known.can_see_now(x.0) { okay_until = i + 1; }
+            }
+            if okay_until < target.path.len() {
+                target.error = "You can't see a clear path there.".into();
+            }
+        }
+        TargetData::Summon(_) => {
+            if target.path.is_empty() {
+                target.error = "There's something in the way.".into();
+            }
+            for (i, x) in target.path.iter().enumerate() {
+                if known.get_status(x.0).unwrap_or(Status::Free) != Status::Free {
+                    target.error = "There's something in the way.".into();
+                } else if !known.can_see_now(x.0) {
+                    target.error = "You can't see a clear path there.".into();
+                }
+                if !target.error.is_empty() { break; }
+                okay_until = i + 1;
+            }
+        }
+    }
+
+    for i in okay_until..target.path.len() {
+        target.path[i].1 = false;
+    }
+}
+
+fn select_valid_target(state: &mut State) -> Option<EID> {
+    let known = state.board.get_known(&state.player);
+    let target = state.target.as_ref()?;
+    let entity = known.get_entity_at(target.target);
+
+    match &target.data {
+        TargetData::FarLook => {
+            let entity = entity?;
+            if can_target(entity) { Some(entity.weak.id()) } else { None }
+        }
+        TargetData::Summon(_) => unimplemented!(),
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 // Game logic
 
 pub struct MoveData { dir: Point, turns: f64 }
@@ -914,7 +998,25 @@ fn act(state: &mut State, e: &Entity, action: Action) -> ActionResult {
     }
 }
 
+fn get_direction(ch: char) -> Option<Point> {
+    match ch {
+        'h' => Some(Point(-1,  0)),
+        'j' => Some(Point( 0,  1)),
+        'k' => Some(Point( 0, -1)),
+        'l' => Some(Point( 1,  0)),
+        'y' => Some(Point(-1, -1)),
+        'u' => Some(Point( 1, -1)),
+        'b' => Some(Point(-1,  1)),
+        'n' => Some(Point( 1,  1)),
+        '.' => Some(Point( 0,  0)),
+        _ => None,
+    }
+}
+
 fn process_input(state: &mut State, input: Input) {
+    let tab = input == Input::Char('\t') || input == Input::BackTab;
+    let enter = input == Input::Char('\n') || input == Input::Char('.');
+
     if let Some(x) = &mut state.choice {
         let count = state.player.data(&state.t).pokemon.len() as i32;
         let direction = match input {
@@ -933,6 +1035,15 @@ fn process_input(state: &mut State, input: Input) {
         return;
     }
 
+    let get_initial_target = |state: &State, source: Point| -> Point {
+        let known = state.board.get_known(&state.player);
+        let focus = known.focus.and_then(|x| known.get_view_of(x));
+        if let Some(target) = focus && target.age == 0 { return target.pos; }
+        let rival = rivals(known, &state.player, &state.t).into_iter().next();
+        if let Some(rival) = rival { return rival.0.pos; }
+        source
+    };
+
     let get_tabbed_target = |prev: Option<EID>, tab_off: bool| -> Option<EID> {
         let known = state.board.get_known(&state.player);
         let rivals = rivals(known, &state.player, &state.t);
@@ -941,18 +1052,73 @@ fn process_input(state: &mut State, input: Input) {
         let t = input == Input::Char('\t');
         let n = rivals.len() + if tab_off { 1 } else { 0 };
 
-        let current = prev.and_then(|x| rivals.iter().position(|y| y.0.weak.id() == x));
-        let start = current.or_else(|| if tab_off { Some(n - 1) } else { None });
+        let next = prev.and_then(|x| rivals.iter().position(|y| y.0.weak.id() == x));
+        let start = next.or_else(|| if tab_off { Some(n - 1) } else { None });
         let index = start.map(|x| if t { x + n + 1 } else { x + n - 1 } % n)
                          .unwrap_or_else(|| if t { 0 } else { n - 1 });
         if index < rivals.len() { Some(rivals[index].0.weak.id()) } else { None }
     };
 
-    if input == Input::Char('\t') || input == Input::BackTab {
+    let get_updated_target = |target: Point| -> Option<Point> {
+        if tab {
+            let known = state.board.get_known(&state.player);
+            let entity = known.get_entity_at(target);
+            let old_eid = entity.map(|x| x.weak.id());
+            let new_eid = get_tabbed_target(old_eid, false);
+            return Some(known.get_view_of(new_eid?)?.pos);
+        }
+
+        let ch = if let Input::Char(x) = input { Some(x) } else { None }?;
+        let dir = get_direction(ch.to_lowercase().next().unwrap_or(ch))?;
+        let scale = if ch.is_uppercase() { 4 } else { 1 };
+
+        let mut prev = target;
+        for _ in 0..scale {
+            let next = prev + dir;
+            if outside_map(state, prev + dir) { break; }
+            prev = next;
+        }
+        Some(prev)
+    };
+
+    if let Some(x) = &state.target {
+        let update = get_updated_target(x.target);
+        if let Some(update) = update && update != x.target {
+            update_target(state, update);
+        } else if enter {
+            if x.error.is_empty() {
+                let focus = select_valid_target(state);
+                state.board.set_focus(&state.player, focus);
+                state.target = None;
+            } else {
+                state.board.log_menu(&x.error, 0x422);
+            }
+        } else if input == Input::Escape {
+            if let TargetData::FarLook = x.data {
+                let valid = x.error.is_empty();
+                let focus = if valid { select_valid_target(state) } else { None };
+                state.board.set_focus(&state.player, focus);
+            }
+            state.board.log_menu("Canceled.", 0x234);
+            state.target = None;
+        }
+        return;
+    }
+
+    if tab {
         let prev = state.board.get_known(&state.player).focus;
         state.board.set_focus(&state.player, get_tabbed_target(prev, true));
     } else if input == Input::Escape {
         state.board.set_focus(&state.player, None);
+    }
+
+    if input == Input::Char('x') {
+        let source = state.player.base(&state.t).pos;
+        let target = get_initial_target(state, source);
+        state.target = Some(init_target(TargetData::FarLook, source, target));
+        state.board.log_menu("Use the movement keys to examine a location:", 0x234);
+        update_target(state, target);
+        return;
     }
 
     if input == Input::Char('f') {
@@ -961,20 +1127,27 @@ fn process_input(state: &mut State, input: Input) {
         return;
     }
 
-    let dir = match input {
-        Input::Char('h') => Some(Point(-1,  0)),
-        Input::Char('j') => Some(Point( 0,  1)),
-        Input::Char('k') => Some(Point( 0, -1)),
-        Input::Char('l') => Some(Point( 1,  0)),
-        Input::Char('y') => Some(Point(-1, -1)),
-        Input::Char('u') => Some(Point( 1, -1)),
-        Input::Char('b') => Some(Point(-1,  1)),
-        Input::Char('n') => Some(Point( 1,  1)),
-        Input::Char('.') => Some(Point( 0,  0)),
-        _ => None,
-    };
+    let dir = if let Input::Char(x) = input { get_direction(x) } else { None };
     state.input = dir.map(|x| Action::Move(MoveData { dir: x, turns: 1. }))
                      .unwrap_or(Action::WaitForInput);
+}
+
+fn update_focus(state: &mut State) {
+    let known = state.board.get_known(&state.player);
+    let focus = match &state.target {
+        Some(x) => known.get_entity_at(x.target),
+        None => known.focus.and_then(|x| known.get_view_of(x)),
+    };
+    if let Some(entity) = focus && can_target(entity) {
+        let floor = Tile::get('.');
+        let Focus { fov, vision, .. } = &mut state.focus;
+        let (player, pos, dir) = (entity.player, entity.pos, entity.dir);
+        let lookup = |p: Point| known.get_cell(p).map(|x| x.tile).unwrap_or(floor);
+        state.board.compute_vision(player, pos, dir, lookup, fov, vision);
+        state.focus.target = Some(pos);
+    } else {
+        state.focus.target = None;
+    }
 }
 
 fn update_state(state: &mut State) {
@@ -992,6 +1165,11 @@ fn update_state(state: &mut State) {
     while !state.inputs.is_empty() && needs_input(state) {
         let input = state.inputs.remove(0);
         process_input(state, input);
+    }
+    if let Some(target) = state.target.as_mut() {
+        target.frame = (target.frame + 1) % UI_TARGET_FRAMES;
+        update_focus(state);
+        return;
     }
 
     let mut update = false;
@@ -1018,20 +1196,7 @@ fn update_state(state: &mut State) {
     if update {
         state.board.update_known(&state.player, &state.t);
     }
-
-    // Update the vision estimate for our target
-    let known = state.board.get_known(&state.player);
-    let focus = known.focus.and_then(|x| known.get_view_of(x));
-    if let Some(target) = focus && target.age == 0 {
-        let floor = Tile::get('.');
-        let Focus { fov, vision, .. } = &mut state.focus;
-        let (player, pos, dir) = (target.player, target.pos, target.dir);
-        let lookup = |p: Point| known.get_cell(p).map(|x| x.tile).unwrap_or(floor);
-        state.board.compute_vision(player, pos, dir, lookup, fov, vision);
-        state.focus.target = Some(pos);
-    } else {
-        state.focus.target = None;
-    }
+    update_focus(state);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1048,6 +1213,8 @@ const UI_MAP_SIZE_Y: i32 = 43;
 const UI_CHOICE_SIZE: i32 = 40;
 const UI_STATUS_SIZE: i32 = 30;
 const UI_COLOR: i32 = 0x430;
+
+const UI_TARGET_FRAMES: i32 = 20;
 
 struct UI {
     log: Rect,
@@ -1188,12 +1355,27 @@ struct Focus {
     target: Option<Point>,
 }
 
+enum TargetData {
+    FarLook,
+    Summon(usize),
+}
+
+struct Target {
+    data: TargetData,
+    error: String,
+    frame: i32,
+    path: Vec<(Point, bool)>,
+    source: Point,
+    target: Point,
+}
+
 pub struct State {
     board: Board,
     focus: Focus,
     input: Action,
     inputs: Vec<Input>,
     choice: Option<i32>,
+    target: Option<Box<Target>>,
     player: Trainer,
     t: Token,
     ui: UI,
@@ -1247,6 +1429,7 @@ impl State {
             input: Action::WaitForInput,
             inputs: vec![],
             choice: None,
+            target: None,
             player,
             t,
         }
@@ -1286,20 +1469,58 @@ impl State {
             }
         }
 
+        let set = |buffer: &mut Buffer, p: Point, glyph: Glyph| {
+            let Point(x, y) = p - offset;
+            if !(0 <= x && x < UI_MAP_SIZE_X) { return; }
+            if !(0 <= y && y < UI_MAP_SIZE_Y) { return; }
+            let point = self.ui.map.root + Point(2 * x, y);
+            buffer.set(point, glyph);
+        };
+
+        let recolor = |buffer: &mut Buffer, p: Point,
+                       fg: Option<Color>, bg: Option<Color>| {
+            let Point(x, y) = p - offset;
+            if !(0 <= x && x < UI_MAP_SIZE_X) { return; }
+            if !(0 <= y && y < UI_MAP_SIZE_Y) { return; }
+            let point = self.ui.map.root + Point(2 * x, y);
+
+            let mut glyph = buffer.get(point);
+            if let Some(fg) = fg {
+                glyph = glyph.with_fg(fg);
+            }
+            if glyph.bg() == Color::default() && let Some(bg) = bg {
+                glyph = glyph.with_bg(bg);
+            }
+            buffer.set(point, glyph);
+        };
+
+        if let Some(target) = &self.target {
+            let color = if target.error.is_empty() { 0x440 } else { 0x400 };
+            recolor(buffer, target.source, Some(Color::black()), Some(0x222.into()));
+            recolor(buffer, target.target, Some(Color::black()), Some(color.into()));
+
+            let frame = target.frame >> 1;
+            let count = UI_TARGET_FRAMES >> 1;
+            let limit = target.path.len() as i32 - 1;
+            let ch = self.ray_character(target.source, target.target);
+            for i in 0..limit {
+                if !((i + count - frame) % count < 2) { continue; }
+                let (point, okay) = target.path[i as usize];
+                let color = if okay { 0x440 } else { 0x400 };
+                set(buffer, point, Glyph::wdfg(ch, color));
+            }
+        }
+
         if let Some(target) = self.focus.target {
             let adjusted = pos - target + self.focus.vision.offset;
             let aware = self.focus.vision.visibility.get(adjusted) >= 0;
             let color = if aware { 0x100 } else { 0x000 };
 
             for (i, point) in self.focus.vision.cells_seen.iter().enumerate() {
-                let Point(x, y) = *point - offset;
-                if !(0 <= x && x < UI_MAP_SIZE_X && 0 <= y && y < UI_MAP_SIZE_Y) { continue; }
-                let point = self.ui.map.root + Point(2 * x, y);
-                let glyph = buffer.get(point);
                 if i == 0 {
-                    buffer.set(point, glyph.with_fg(Color::black()).with_bg(0x222));
+                    recolor(buffer, *point, Some(Color::black()), Some(0x222.into()));
                 } else {
-                    buffer.set(point, glyph.with_bg(color));
+                    recolor(buffer, *point, None, Some(color.into()));
                 }
             }
         }
@@ -1336,7 +1557,11 @@ impl State {
             slice.write_chr(*glyph).space().write_str(name);
             slice.spaces(ss).set_fg(Some(hp_color)).write_str(&hp_text).newline();
 
-            if known.focus == Some(entity.weak.id()) {
+            let targeted = match &self.target {
+                Some(x) => x.target == entity.pos,
+                None => known.focus == Some(entity.weak.id()),
+            };
+            if targeted {
                 let start = slice.get_cursor() - Point(0, 1);
                 let (fg, bg) = (Color::default(), Color::gray());
                 for x in 0..UI_STATUS_SIZE {
@@ -1354,8 +1579,7 @@ impl State {
     }
 
     fn render_target(&self, known: &Knowledge, slice: &mut Slice) {
-        let focus = known.focus.and_then(|x| known.get_view_of(x));
-        if focus.is_none() {
+        if self.target.is_none() && known.focus.is_none() {
             let fg = Some(0x111.into());
             slice.newline();
             slice.set_fg(fg).write_str("No target selected.").newline();
@@ -1364,25 +1588,48 @@ impl State {
             return;
         }
 
-        let target = focus.unwrap();
-        let fg = if target.age > 0 { Some(0x111.into()) } else { None };
-
-        let explanation = {
-            if target.age > 0 { "Last target: (remembered)" } else { "Last target:" }
+        let (cell, entity, header, seen) = match &self.target {
+            Some(x) => {
+                let cell = known.get_cell(x.target);
+                let seen = cell.map(|x| x.age == 0).unwrap_or(false);
+                let entity = cell.and_then(|x| known.get_entity(x));
+                let header = match &x.data {
+                    TargetData::FarLook => "Examining...".into(),
+                    TargetData::Summon(_) => unimplemented!()
+                };
+                (cell, entity, header, seen)
+            }
+            None => {
+                let entity = known.focus.and_then(|x| known.get_view_of(x));
+                let seen = entity.map(|x| x.age == 0).unwrap_or(false);
+                let cell = entity.and_then(|x| known.get_cell(x.pos));
+                let header = if seen {
+                    "Last target:"
+                } else {
+                    "Last target: (remembered)"
+                };
+                (cell, entity, header, seen)
+            },
         };
 
-        let (text, tile) = {
-            let text = if target.age > 0 { "Stood on: " } else { "Standing on: " };
-            let tile = known.get_cell(target.pos).map(|x| x.tile);
-            (text, tile)
+        let fg = if self.target.is_some() || seen { None } else { Some(0x111.into()) };
+        let text = if entity.is_some() {
+            if seen { "Standing on: " } else { "Stood on: " }
+        } else {
+            if seen { "You see: " } else { "You saw: " }
         };
 
         slice.newline();
-        slice.set_fg(fg).write_str(explanation).newline();
-        self.render_entity(None, fg, target, slice);
+        slice.set_fg(fg).write_str(header).newline();
+
+        if let Some(x) = entity {
+            self.render_entity(None, fg, x, slice);
+        } else {
+            slice.newline();
+        }
 
         slice.set_fg(fg).write_str(text);
-        if let Some(x) = tile {
+        if let Some(CellKnowledge { tile: x, .. }) = cell {
             slice.write_chr(x.glyph).space();
             slice.write_chr('(').write_str(x.description).write_chr(')').newline();
         } else {
@@ -1479,6 +1726,14 @@ impl State {
         for _ in 0..count { slice.write_chr(glyph); }
         for _ in count..width { slice.write_chr(' '); }
         slice.write_chr(']');
+    }
+
+    fn ray_character(&self, source: Point, target: Point) -> char {
+        let Point(x, y) = source - target;
+        let (ax, ay) = (x.abs(), y.abs());
+        if ax > 2 * ay { return '-'; }
+        if ay > 2 * ax { return '|'; }
+        if (x > 0) == (y > 0) { '\\' } else { '/' }
     }
 
     fn hp_color(&self, hp: f64) -> Color {
