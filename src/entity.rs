@@ -122,6 +122,7 @@ pub struct TrainerData {
     pub max_hp: i32,
     pub name: Rc<str>,
     pub pokemon: Vec<PokemonEdge>,
+    pub summons: Vec<Pokemon>,
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -170,7 +171,8 @@ fn trainer(pos: Point, player: bool, name: &str) -> EntityRepr {
         pos,
     };
     let (cur_hp, max_hp) = (TRAINER_HP, TRAINER_HP);
-    let data = TrainerData { cur_hp, max_hp, name: name.into(), pokemon: vec![] };
+    let (name, pokemon, summons) = (name.into(), vec![], vec![]);
+    let data = TrainerData { cur_hp, max_hp, name, pokemon, summons };
     EntityRepr { base, data: EntityType::Trainer(data) }
 }
 

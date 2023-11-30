@@ -110,11 +110,23 @@ pub struct Point(pub i32, pub i32);
 assert_eq_size!(Point, 8);
 
 impl Point {
-    pub fn len_l2(&self) -> f64 { (self.len_l2_squared() as f64).sqrt() }
+    pub fn len_nethack(&self) -> i32 {
+        let (ax, ay) = (self.0.abs() as i64, self.1.abs() as i64);
+        let (min, max) = (std::cmp::min(ax, ay), std::cmp::max(ax, ay));
+        ((46 * min + 95 * max + 25) / 100) as i32
+    }
+
+    pub fn len_l2(&self) -> f64 {
+        (self.len_l2_squared() as f64).sqrt()
+    }
 
     pub fn len_l2_squared(&self) -> i64 {
         let (x, y) = (self.0 as i64, self.1 as i64);
         x * x + y * y
+    }
+
+    pub fn scale(&self, scale: i32) -> Point {
+        Point(self.0 * scale, self.1 * scale)
     }
 }
 

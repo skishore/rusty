@@ -45,6 +45,10 @@ const ASTAR_LIMIT_WANDER: i32 = 256;
 const BFS_LIMIT_ATTACK: i32 = 8;
 const BFS_LIMIT_WANDER: i32 = 64;
 
+const PLAYER_KEY: char = 'a';
+const PARTY_KEYS: [char; 6] = ['a', 's', 'd', 'f', 'g', 'h'];
+const SUMMON_KEYS: [char; 3] = ['s', 'd', 'f'];
+
 #[derive(Eq, PartialEq)]
 pub enum Input { Escape, BackTab, Char(char) }
 
@@ -651,12 +655,60 @@ fn mapgen(map: &mut Matrix<&'static Tile>) {
 
 // Targeting UI
 
+fn check_follower_square(known: &Knowledge, leader: &Entity, t: &Token,
+                         target: Point, ignore_occupant: bool) -> bool {
+    let free = match known.get_status(target).unwrap_or(Status::Blocked) {
+        Status::Free => true,
+        Status::Blocked => false,
+        Status::Occupied => ignore_occupant,
+    };
+    if !free { return false }
+
+    let source = leader.base(t).pos;
+    let length = (source - target).len_nethack();
+    if length > 2 { return false; }
+    if length < 2 { return true; }
+
+    let vision = |p: Point| { known.get_cell(p).map(|x| x.visibility).unwrap_or(-1) };
+    vision(source) == vision(target)
+}
+
 fn can_target(entity: &EntityKnowledge) -> bool {
     entity.age == 0 && !entity.friend
 }
 
 fn init_target(data: TargetData, source: Point, target: Point) -> Box<Target> {
     Box::new(Target { data, error: "".into(), frame: 0, path: vec![], source, target })
+}
+
+fn init_summon_target(data: TargetData, state: &State) -> Box<Target> {
+    let known = state.board.get_known(&state.player);
+    let source = state.player.base(&state.t).pos;
+    let mut target = init_target(data, source, source);
+
+    let mut okay = |p: Point| {
+        if !check_follower_square(known, &state.player, &state.t, p, false) { return false; }
+        update_target(state, &mut target, p);
+        target.error.is_empty()
+    };
+
+    let best = source + state.player.base(&state.t).dir.scale(2);
+    let next = source + state.player.base(&state.t).dir.scale(1);
+    if okay(best) { return target; }
+    if okay(next) { return target; }
+
+    let mut options: Vec<Point> = vec![];
+    for dx in -2..=2 {
+        for dy in -2..=2 {
+            let pos = source + Point(dx, dy);
+            if okay(pos) { options.push(pos); }
+        }
+    }
+
+    options.sort_by_cached_key(|x| (*x - best).len_l2_squared());
+    let update = options.into_iter().next().unwrap_or(source);
+    update_target(state, &mut target, update);
+    target
 }
 
 fn outside_map(state: &State, point: Point) -> bool {
@@ -666,10 +718,7 @@ fn outside_map(state: &State, point: Point) -> bool {
     delta.0.abs() > limit_x || delta.1.abs() > limit_y
 }
 
-fn update_target(state: &mut State, update: Point) {
-    if state.target.is_none() { return; }
-    let target = state.target.as_mut().unwrap();
-
+fn update_target(state: &State, target: &mut Target, update: Point) {
     let mut okay_until = 0;
     let known = state.board.get_known(&state.player);
     let los = LOS(target.source, update);
@@ -719,7 +768,9 @@ fn select_valid_target(state: &mut State) -> Option<EID> {
             let entity = entity?;
             if can_target(entity) { Some(entity.weak.id()) } else { None }
         }
-        TargetData::Summon(_) => unimplemented!(),
+        TargetData::Summon(_) => {
+            known.focus
+        }
     }
 }
 
@@ -1016,18 +1067,38 @@ fn get_direction(ch: char) -> Option<Point> {
 fn process_input(state: &mut State, input: Input) {
     let tab = input == Input::Char('\t') || input == Input::BackTab;
     let enter = input == Input::Char('\n') || input == Input::Char('.');
+    let name = |pid: &PID| -> &str { pid.species.name };
 
     if let Some(x) = &mut state.choice {
-        let count = state.player.data(&state.t).pokemon.len() as i32;
-        let direction = match input {
-            Input::Char('j') => 1,
-            Input::Char('k') => -1,
-            _ => 0,
+        let choice = if enter {
+            Some(*x as usize)
+        } else {
+            PARTY_KEYS.iter().position(|x| input == Input::Char(*x))
         };
-        if direction != 0 {
-            *x += direction;
+        let count = state.player.data(&state.t).pokemon.len() as i32;
+        let dir = if let Input::Char(x) = input { get_direction(x) } else { None };
+        if let Some(dir) = dir && dir.0 == 0 {
+            *x += dir.1;
             if *x >= count { *x = 0; }
             if *x < 0 { *x = max(count - 1, 0); }
+        } else if let Some(choice) = choice {
+            let pokemon = &state.player.data(&state.t).pokemon;
+            if choice >= pokemon.len() {
+                let error = format!("You are only carrying {} Pokemon!", pokemon.len());
+                state.board.log_menu(error, 0x422);
+            } else if let PokemonEdge::Out(x) = &pokemon[choice] {
+                let error = format!("{} is already out!", name(&x.data(&state.t).me));
+                state.board.log_menu(error, 0x422);
+            } else if let PokemonEdge::In(x) = &pokemon[choice] && x.cur_hp == 0 {
+                let error = format!("{} has no strength left!", name(x));
+                state.board.log_menu(error, 0x422);
+            } else if let PokemonEdge::In(x) = &pokemon[choice] {
+                let message = format!("Choose where to send out {}:", name(x));
+                state.board.log_menu(message, 0x234);
+                let target = init_summon_target(TargetData::Summon(choice), state);
+                state.target = Some(target);
+                state.choice = None;
+            }
         } else if input == Input::Escape {
             state.board.log_menu("Canceled.", 0x234);
             state.choice = None;
@@ -1084,7 +1155,9 @@ fn process_input(state: &mut State, input: Input) {
     if let Some(x) = &state.target {
         let update = get_updated_target(x.target);
         if let Some(update) = update && update != x.target {
-            update_target(state, update);
+            let mut target = state.target.take();
+            target.as_mut().map(|x| update_target(state, x, update));
+            state.target = target;
         } else if enter {
             if x.error.is_empty() {
                 let focus = select_valid_target(state);
@@ -1113,15 +1186,17 @@ fn process_input(state: &mut State, input: Input) {
     }
 
     if input == Input::Char('x') {
-        let source = state.player.base(&state.t).pos;
-        let target = get_initial_target(state, source);
-        state.target = Some(init_target(TargetData::FarLook, source, target));
         state.board.log_menu("Use the movement keys to examine a location:", 0x234);
-        update_target(state, target);
+        let source = state.player.base(&state.t).pos;
+        let update = get_initial_target(state, source);
+        let mut target = init_target(TargetData::FarLook, source, update);
+        update_target(state, &mut target, update);
+        state.target = Some(target);
         return;
     }
 
-    if input == Input::Char('f') {
+    let index = SUMMON_KEYS.iter().position(|x| input == Input::Char(*x));
+    if let Some(i) = index && i >= state.player.data(&state.t).summons.len() {
         state.board.log_menu("Choose a Pokemon to send out with J/K:", 0x234);
         state.choice = Some(0);
         return;
@@ -1228,7 +1303,7 @@ struct UI {
 
 impl Default for UI {
     fn default() -> Self {
-        let kl = Self::render_key('a').chars().count() as i32;
+        let kl = Self::render_key(PLAYER_KEY).chars().count() as i32;
         assert!(kl == UI_KEY_SPACE);
 
         let ss = UI_STATUS_SIZE;
@@ -1574,11 +1649,16 @@ impl State {
 
     fn render_status(&self, known: &Knowledge, e: &Trainer, slice: &mut Slice) {
         if let Some(entity) = known.get_view_of(e.id()) {
-            self.render_entity(Some('a'), None, entity, slice);
+            self.render_entity(Some(PLAYER_KEY), None, entity, slice);
+        }
+        for (_, key) in SUMMON_KEYS.iter().enumerate() {
+            self.render_empty_option(*key, 0, slice);
         }
     }
 
     fn render_target(&self, known: &Knowledge, slice: &mut Slice) {
+        let name = |pid: &PID| -> &str { pid.species.name };
+
         if self.target.is_none() && known.focus.is_none() {
             let fg = Some(0x111.into());
             slice.newline();
@@ -1595,7 +1675,13 @@ impl State {
                 let entity = cell.and_then(|x| known.get_entity(x));
                 let header = match &x.data {
                     TargetData::FarLook => "Examining...".into(),
-                    TargetData::Summon(_) => unimplemented!()
+                    TargetData::Summon(x) => {
+                        let name = match &self.player.data(&self.t).pokemon[*x] {
+                            PokemonEdge::In(x) => name(x),
+                            PokemonEdge::Out(x) => name(&x.data(&self.t).me),
+                        };
+                        format!("Sending out {}...", name)
+                    }
                 };
                 (cell, entity, header, seen)
             }
@@ -1607,7 +1693,7 @@ impl State {
                     "Last target:"
                 } else {
                     "Last target: (remembered)"
-                };
+                }.into();
                 (cell, entity, header, seen)
             },
         };
@@ -1620,7 +1706,7 @@ impl State {
         };
 
         slice.newline();
-        slice.set_fg(fg).write_str(header).newline();
+        slice.set_fg(fg).write_str(&header).newline();
 
         if let Some(x) = entity {
             self.render_entity(None, fg, x, slice);
@@ -1639,8 +1725,7 @@ impl State {
 
     fn render_choice(&self, e: &Trainer, choice: i32, slice: &mut Slice) {
         let options = &e.data(&self.t).pokemon;
-        let keys = ['a', 's', 'd', 'f', 'g', 'h'];
-        for (i, key) in keys.iter().enumerate() {
+        for (i, key) in PARTY_KEYS.iter().enumerate() {
             let selected = choice == i as i32;
             match if i < options.len() { Some(&options[i]) } else { None } {
                 Some(PokemonEdge::Out(x)) => {
@@ -1649,18 +1734,18 @@ impl State {
                 },
                 Some(PokemonEdge::In(x)) =>
                     self.render_option(*key, 0, selected, x, 1.0, slice),
-                None => self.render_empty_option(*key, slice),
+                None => self.render_empty_option(*key, UI_COL_SPACE + 1, slice),
             }
         }
     }
 
-    fn render_empty_option(&self, key: char, slice: &mut Slice) {
+    fn render_empty_option(&self, key: char, space: i32, slice: &mut Slice) {
+        let n = space as usize;
         let fg = Some(0x111.into());
-        let mut prefix = (0..UI_COL_SPACE + 1).map(|_| ' ').collect::<String>();
-        prefix.push_str(&UI::render_key(key));
+        let prefix = UI::render_key(key);
 
         slice.newline();
-        slice.set_fg(fg).write_str(&prefix).write_str("---").newline();
+        slice.set_fg(fg).spaces(n).write_str(&prefix).write_str("---").newline();
         slice.newline().newline().newline();
     }
 
