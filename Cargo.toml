@@ -10,3 +10,9 @@ lazy_static = "1.4.0"
 rand = "0.8.5"
 slotmap = "1.0.7"
 termion = "2.0.1"
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

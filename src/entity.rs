@@ -1,10 +1,16 @@
-use std::ops::Deref;
-use std::rc::{Rc, Weak};
+use std::boxed::Box;
+use std::cell::Cell;
+use std::ops::{Deref, DerefMut, Index, IndexMut};
+use std::num::NonZeroU64;
+use std::rc::Rc;
 
 use lazy_static::lazy_static;
+use slotmap::{DefaultKey, Key, KeyData, SlotMap};
 
+use crate::{cast, static_assert_size};
 use crate::base::{Glyph, HashMap, Point};
-use crate::cell::{self, Cell};
+use crate::game::AIState;
+use crate::knowledge::Knowledge;
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -12,6 +18,7 @@ use crate::cell::{self, Cell};
 
 const TRAINER_HP: i32 = 8;
 const TRAINER_SPEED: f64 = 0.10;
+const TYPED_ENTITY_OFFSET: isize = 8;
 
 lazy_static! {
     static ref POKEMON_SPECIES: HashMap<&'static str, PokemonSpeciesData> = {
@@ -34,54 +41,11 @@ lazy_static! {
 
 //////////////////////////////////////////////////////////////////////////////
 
-// Pathing state definitions:
+// Entity data definitions
 
-#[derive(Debug)]
-pub struct Fight {
-    pub age: i32,
-    pub target: Point,
-}
-
-#[derive(Debug)]
-pub struct Flight {
-    pub age: i32,
-    pub switch: i32,
-    pub target: Point,
-}
-
-#[derive(Debug)]
-pub struct Wander {
-    pub time: i32,
-}
-
-#[derive(Debug)]
-pub struct Assess {
-    pub switch: i32,
-    pub target: Point,
-    pub time: i32,
-}
-
-#[derive(Debug)]
-pub enum AIState {
-    Fight(Fight),
-    Flight(Flight),
-    Wander(Wander),
-    Assess(Assess),
-}
-
-impl Default for Wander {
-    fn default() -> Self { Self { time: 0 } }
-}
-
-impl Default for AIState {
-    fn default() -> Self { Self::Wander(Wander::default()) }
-}
-
-//////////////////////////////////////////////////////////////////////////////
-
-// Entity data definitions:
-
+#[repr(C)]
 pub struct EntityData {
+    eid: EID,
     pub player: bool,
     pub removed: bool,
     pub move_timer: i32,
@@ -90,7 +54,23 @@ pub struct EntityData {
     pub speed: f64,
     pub dir: Point,
     pub pos: Point,
+    pub known: Box<Knowledge>,
 }
+static_assert_size!(EntityData, 56);
+
+#[repr(C)]
+pub struct Pokemon {
+    entity: EntityData,
+    pub data: Box<PokemonData>,
+}
+static_assert_size!(Pokemon, 64);
+
+#[repr(C)]
+pub struct Trainer {
+    entity: EntityData,
+    pub data: Box<TrainerData>,
+}
+static_assert_size!(Trainer, 64);
 
 pub struct PokemonSpeciesData {
     pub name: &'static str,
@@ -99,22 +79,16 @@ pub struct PokemonSpeciesData {
     pub hp: i32,
 }
 
-#[derive(Clone)]
 pub struct PokemonIndividualData {
     pub species: &'static PokemonSpeciesData,
-    pub trainer: Option<Trainer>,
+    pub trainer: Option<TID>,
     pub cur_hp: i32,
     pub max_hp: i32,
 }
 
 pub struct PokemonData {
-    pub ai: std::cell::Cell<Option<Box<AIState>>>,
+    pub ai: Cell<Option<Box<AIState>>>,
     pub me: Box<PokemonIndividualData>,
-}
-
-pub enum PokemonEdge {
-    Out(Pokemon),
-    In(Box<PokemonIndividualData>),
 }
 
 pub struct TrainerData {
@@ -122,14 +96,33 @@ pub struct TrainerData {
     pub max_hp: i32,
     pub name: Rc<str>,
     pub pokemon: Vec<PokemonEdge>,
-    pub summons: Vec<Pokemon>,
+    pub summons: Vec<PID>,
+}
+
+pub enum PokemonEdge {
+    Out(PID),
+    In(Box<PokemonIndividualData>),
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
 // Constructors
 
-fn individual(species: &str, trainer: Option<Trainer>) -> Box<PokemonIndividualData> {
+pub struct PokemonArgs<'a> {
+    pub pos: Point,
+    pub dir: Point,
+    pub species: &'a str,
+    pub trainer: Option<TID>,
+}
+
+pub struct TrainerArgs<'a> {
+    pub pos: Point,
+    pub dir: Point,
+    pub name: &'a str,
+    pub player: bool,
+}
+
+fn individual(species: &str, trainer: Option<TID>) -> Box<PokemonIndividualData> {
     let species = POKEMON_SPECIES.get(species).unwrap_or_else(
         || panic!("Unknown Pokemon species: {}", species));
     let me = PokemonIndividualData {
@@ -141,199 +134,134 @@ fn individual(species: &str, trainer: Option<Trainer>) -> Box<PokemonIndividualD
     Box::new(me)
 }
 
-fn pokemon(pos: Point, dir: Point, species: &str, trainer: Option<Trainer>) -> EntityRepr {
+fn pokemon(eid: EID, args: &PokemonArgs) -> Entity {
     let data = PokemonData {
-        ai: std::cell::Cell::default(),
-        me: individual(species, trainer),
+        ai: Cell::default(),
+        me: individual(args.species, args.trainer),
     };
-    let base = EntityData {
+    let entity = EntityData {
+        eid,
         player: false,
         removed: false,
         move_timer: 0,
         turn_timer: 0,
         glyph: data.me.species.glyph,
         speed: data.me.species.speed,
-        dir,
-        pos,
+        dir: args.dir,
+        pos: args.pos,
+        known: Box::default(),
     };
-    EntityRepr { base, data: EntityType::Pokemon(data) }
+    Entity::Pokemon(Pokemon { entity, data: Box::new(data) })
 }
 
-fn trainer(pos: Point, player: bool, name: &str) -> EntityRepr {
-    let base = EntityData {
-        player,
+fn trainer(eid: EID, args: &TrainerArgs) -> Entity {
+    let entity = EntityData {
+        eid,
+        player: args.player,
         removed: false,
         move_timer: 0,
         turn_timer: 0,
         glyph: Glyph::wide('@'),
         speed: TRAINER_SPEED,
-        dir: Point(1, 0),
-        pos,
+        dir: args.dir,
+        pos: args.pos,
+        known: Box::default(),
     };
     let (cur_hp, max_hp) = (TRAINER_HP, TRAINER_HP);
-    let (name, pokemon, summons) = (name.into(), vec![], vec![]);
+    let (name, pokemon, summons) = (args.name.into(), vec![], vec![]);
     let data = TrainerData { cur_hp, max_hp, name, pokemon, summons };
-    EntityRepr { base, data: EntityType::Trainer(data) }
+    Entity::Trainer(Trainer { entity, data: Box::new(data) })
 }
 
 //////////////////////////////////////////////////////////////////////////////
 
-// Boilerplate follows...
+// Impls and references
 
-pub struct EntityRepr {
-    base: EntityData,
-    data: EntityType,
+#[repr(C)]
+pub enum Entity {
+    Pokemon(Pokemon),
+    Trainer(Trainer),
 }
 
-enum EntityType {
-    Pokemon(PokemonData),
-    Trainer(TrainerData),
+impl Deref for Entity {
+    type Target = EntityData;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        let base = self as *const Self as *const u8;
+        unsafe { &*(base.offset(TYPED_ENTITY_OFFSET) as *const EntityData) }
+    }
 }
 
-pub enum ET<'a> {
-    Pokemon(&'a Pokemon),
-    Trainer(&'a Trainer),
+impl DerefMut for Entity {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let base = self as *mut Self as *mut u8;
+        unsafe { &mut *(base.offset(TYPED_ENTITY_OFFSET) as *mut EntityData) }
+    }
 }
 
-pub type Token = cell::Token<EntityRepr>;
-
-#[derive(Copy, Clone, Eq, Hash, PartialEq)]
-pub struct EID(*const Cell<EntityRepr>);
-
-#[derive(Clone)]
-#[repr(transparent)]
-pub struct Entity(Rc<Cell<EntityRepr>>);
-
-#[derive(Clone, Default)]
-#[repr(transparent)]
-pub struct WeakEntity(Weak<Cell<EntityRepr>>);
-
-impl From<&Entity> for WeakEntity {
-    fn from(val: &Entity) -> Self { Self(Rc::downgrade(&val.0)) }
+impl Deref for Pokemon {
+    type Target = EntityData;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target { &self.entity }
 }
 
-impl WeakEntity {
-    pub fn id(&self) -> EID { EID(Weak::as_ptr(&self.0)) }
+impl Deref for Trainer {
+    type Target = EntityData;
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target { &self.entity }
+}
 
-    pub fn upgrade(&self) -> Option<Entity> { self.0.upgrade().map(|x| Entity(x)) }
+impl DerefMut for Pokemon {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.entity }
+}
+
+impl DerefMut for Trainer {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.entity }
 }
 
 impl Entity {
-    pub fn base<'a>(&'a self, t: &'a Token) -> &'a EntityData {
-        &self.0.get(t).base
+    pub fn id(&self) -> EID { self.eid }
+
+    pub fn species(&self) -> Option<&'static PokemonSpeciesData> {
+        match self {
+            Entity::Pokemon(x) => Some(x.data.me.species),
+            Entity::Trainer(_) => None,
+        }
     }
 
-    pub fn base_mut<'a>(&'a self, t: &'a mut Token) -> &'a mut EntityData {
-        &mut self.0.get_mut(t).base
-    }
-
-    pub fn id(&self) -> EID { EID(Rc::as_ptr(&self.0)) }
-
-    pub fn test<'a>(&'a self, t: &Token) -> ET<'a> {
-        let p = self as *const Entity;
-        match &self.0.get(t).data {
-            EntityType::Pokemon(_) => ET::Pokemon(unsafe { &*(p as *const Pokemon) }),
-            EntityType::Trainer(_) => ET::Trainer(unsafe { &*(p as *const Trainer) }),
+    pub fn trainer(&self) -> Option<TID> {
+        match self {
+            Entity::Pokemon(x) => x.data.me.trainer,
+            Entity::Trainer(x) => Some(x.id()),
         }
     }
 }
 
-#[derive(Clone)]
-#[repr(transparent)]
-pub struct Pokemon(Entity);
-
-#[derive(Clone, Default)]
-#[repr(transparent)]
-pub struct WeakPokemon(WeakEntity);
-
-impl From<&Pokemon> for WeakPokemon {
-    fn from(val: &Pokemon) -> Self { Self((&val.0).into()) }
-}
-
-impl WeakPokemon {
-    pub fn upgrade(&self) -> Option<Pokemon> { self.0.upgrade().map(|x| Pokemon(x)) }
-}
-
-impl Deref for Pokemon {
-    type Target = Entity;
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-impl Deref for WeakPokemon {
-    type Target = WeakEntity;
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
-
 impl Pokemon {
-    pub fn new(pos: Point, dir: Point, species: &str, trainer: Option<Trainer>) -> Pokemon {
-        Pokemon(Entity(Rc::new(Cell::new(pokemon(pos, dir, species, trainer)))))
+    pub fn id(&self) -> PID { PID(self.eid) }
+
+    pub fn base(&self) -> &Entity {
+        let base = self as *const Self as *const u8;
+        unsafe { &*(base.offset(-TYPED_ENTITY_OFFSET) as *const Entity) }
     }
-
-    pub fn data<'a>(&'a self, t: &'a Token) -> &'a PokemonData {
-        let data = &self.0.0.get(t).data;
-        if let EntityType::Pokemon(x) = data { return x; }
-        unsafe { std::hint::unreachable_unchecked() }
-    }
-
-    pub fn data_mut<'a>(&'a self, t: &'a mut Token) -> &'a mut PokemonData {
-        let data = &mut self.0.0.get_mut(t).data;
-        if let EntityType::Pokemon(ref mut x) = data { return x; }
-        unsafe { std::hint::unreachable_unchecked() }
-    }
-}
-
-#[derive(Clone)]
-#[repr(transparent)]
-pub struct Trainer(Entity);
-
-#[derive(Clone, Default)]
-#[repr(transparent)]
-pub struct WeakTrainer(WeakEntity);
-
-impl From<&Trainer> for WeakTrainer {
-    fn from(val: &Trainer) -> Self { Self((&val.0).into()) }
-}
-
-impl WeakTrainer {
-    pub fn upgrade(&self) -> Option<Trainer> { self.0.upgrade().map(|x| Trainer(x)) }
-}
-
-impl Deref for Trainer {
-    type Target = Entity;
-    fn deref(&self) -> &Self::Target { &self.0 }
-}
-
-impl Deref for WeakTrainer {
-    type Target = WeakEntity;
-    fn deref(&self) -> &Self::Target { &self.0 }
 }
 
 impl Trainer {
-    pub fn new(pos: Point, player: bool, name: &str) -> Trainer {
-        Trainer(Entity(Rc::new(Cell::new(trainer(pos, player, name)))))
+    pub fn id(&self) -> TID { TID(self.eid) }
+
+    pub fn base(&self) -> &Entity {
+        let base = self as *const Self as *const u8;
+        unsafe { &*(base.offset(-TYPED_ENTITY_OFFSET) as *const Entity) }
     }
 
-    pub fn data<'a>(&'a self, t: &'a Token) -> &'a TrainerData {
-        let data = &self.0.0.get(t).data;
-        if let EntityType::Trainer(x) = data { return x; }
-        unsafe { std::hint::unreachable_unchecked() }
-    }
-
-    pub fn data_mut<'a>(&'a self, t: &'a mut Token) -> &'a mut TrainerData {
-        let data = &mut self.0.0.get_mut(t).data;
-        if let EntityType::Trainer(ref mut x) = data { return x; }
-        unsafe { std::hint::unreachable_unchecked() }
-    }
-
-    pub fn register_pokemon(&mut self, t: &mut Token, species: &str) {
-        let me = individual(species, Some(self.clone()));
-        self.data_mut(t).pokemon.push(PokemonEdge::In(me));
+    pub fn register_pokemon(&mut self, species: &str) {
+        let me = individual(species, Some(self.id()));
+        self.data.pokemon.push(PokemonEdge::In(me));
     }
 }
-
-//////////////////////////////////////////////////////////////////////////////
-
-// More boilerplate: equality operators
 
 impl PartialEq for &'static PokemonSpeciesData {
     fn eq(&self, next: &&'static PokemonSpeciesData) -> bool {
@@ -344,20 +272,93 @@ impl PartialEq for &'static PokemonSpeciesData {
 
 impl Eq for &'static PokemonSpeciesData {}
 
-impl PartialEq for Entity {
-    fn eq(&self, other: &Entity) -> bool { Rc::ptr_eq(&self.0, &other.0) }
+//////////////////////////////////////////////////////////////////////////////
+
+// Slotmap support
+
+#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[repr(transparent)]
+pub struct EID(NonZeroU64);
+static_assert_size!(Option<EID>, 8);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct PID(EID);
+static_assert_size!(Option<PID>, 8);
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[repr(transparent)]
+pub struct TID(EID);
+static_assert_size!(Option<TID>, 8);
+
+fn to_key(eid: EID) -> DefaultKey {
+    KeyData::from_ffi(eid.0.get()).into()
 }
 
-impl Eq for Entity {}
-
-impl PartialEq for Pokemon {
-    fn eq(&self, other: &Pokemon) -> bool { Rc::ptr_eq(&self.0.0, &other.0.0) }
+fn to_eid(key: DefaultKey) -> EID {
+    EID(NonZeroU64::new(key.data().as_ffi()).unwrap())
 }
 
-impl Eq for Pokemon {}
-
-impl PartialEq for Trainer {
-    fn eq(&self, other: &Trainer) -> bool { Rc::ptr_eq(&self.0.0, &other.0.0) }
+pub trait EntityMapKey {
+    type ValueType;
+    fn eid(self) -> EID;
+    fn as_ref(x: &Entity) -> &Self::ValueType;
+    fn as_mut(x: &mut Entity) -> &mut Self::ValueType;
 }
 
-impl Eq for Trainer {}
+impl EntityMapKey for EID {
+    type ValueType = Entity;
+    fn eid(self) -> EID { self }
+    fn as_ref(x: &Entity) -> &Entity { x }
+    fn as_mut(x: &mut Entity) -> &mut Entity { x }
+}
+
+impl EntityMapKey for PID {
+    type ValueType = Pokemon;
+    fn eid(self) -> EID { self.0 }
+    fn as_ref(x: &Entity) -> &Pokemon { cast!(x, Entity::Pokemon) }
+    fn as_mut(x: &mut Entity) -> &mut Pokemon { cast!(x, Entity::Pokemon) }
+}
+
+impl EntityMapKey for TID {
+    type ValueType = Trainer;
+    fn eid(self) -> EID { self.0 }
+    fn as_ref(x: &Entity) -> &Trainer { cast!(x, Entity::Trainer) }
+    fn as_mut(x: &mut Entity) -> &mut Trainer { cast!(x, Entity::Trainer) }
+}
+
+#[derive(Default)]
+pub struct EntityMap {
+    map: SlotMap<DefaultKey, Entity>,
+}
+
+impl EntityMap {
+    pub fn get<T: EntityMapKey>(&self, id: T) -> Option<&T::ValueType> {
+        self.map.get(to_key(id.eid())).map(|x| T::as_ref(x))
+    }
+
+    pub fn get_mut<T: EntityMapKey>(&mut self, id: T) -> Option<&mut T::ValueType> {
+        self.map.get_mut(to_key(id.eid())).map(|x| T::as_mut(x))
+    }
+
+    pub fn add_pokemon(&mut self, args: &PokemonArgs) -> PID {
+        PID(to_eid(self.map.insert_with_key(|x| pokemon(to_eid(x), args))))
+    }
+
+    pub fn add_trainer(&mut self, args: &TrainerArgs) -> TID {
+        TID(to_eid(self.map.insert_with_key(|x| trainer(to_eid(x), args))))
+    }
+
+    pub fn remove_entity(&mut self, eid: EID) -> Option<Entity> {
+        self.map.remove(to_key(eid))
+    }
+}
+
+impl<T: EntityMapKey> Index<T> for EntityMap {
+    type Output = T::ValueType;
+    fn index(&self, id: T) -> &Self::Output { self.get(id).unwrap() }
+}
+
+impl<T: EntityMapKey> IndexMut<T> for EntityMap {
+    fn index_mut(&mut self, id: T) -> &mut Self::Output { self.get_mut(id).unwrap() }
+}

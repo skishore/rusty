@@ -2,9 +2,9 @@
 #![feature(test)]
 
 mod base;
-mod cell;
 mod game;
 mod entity;
+mod knowledge;
 mod pathing;
 
 use std::io::{self, Write};

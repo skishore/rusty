@@ -5,7 +5,14 @@ use std::cmp::max;
 // Basics
 
 #[macro_export]
-macro_rules! assert_eq_size {
+macro_rules! cast {
+    ($name: ident, $enum:ident::$variant:ident) => {
+        if let $enum::$variant(x) = $name { x } else { panic!() }
+    }
+}
+
+#[macro_export]
+macro_rules! static_assert_size {
     ($x:ty, $y:expr) => {
         const _: fn() = || {
             let _ = std::mem::transmute::<$x, [u8; $y]>;
@@ -20,7 +27,7 @@ pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Char(pub u16);
-assert_eq_size!(Char, 2);
+static_assert_size!(Char, 2);
 
 impl Char {
     pub fn is_wide(&self) -> bool { self.0 >= 0xff00 }
@@ -28,7 +35,7 @@ impl Char {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Color(pub u8);
-assert_eq_size!(Color, 1);
+static_assert_size!(Color, 1);
 
 impl Default for Color {
     fn default() -> Self { Self(0xff) }
@@ -107,7 +114,7 @@ pub fn clamp<T: PartialOrd>(x: T, min: T, max: T) -> T {
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Point(pub i32, pub i32);
-assert_eq_size!(Point, 8);
+static_assert_size!(Point, 8);
 
 impl Point {
     pub fn len_nethack(&self) -> i32 {
