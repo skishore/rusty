@@ -1,13 +1,15 @@
 use std::cmp::max;
 
+use rand::random;
+
 //////////////////////////////////////////////////////////////////////////////
 
 // Basics
 
 #[macro_export]
 macro_rules! cast {
-    ($name: ident, $enum:ident::$variant:ident) => {
-        if let $enum::$variant(x) = $name { x } else { panic!() }
+    ($expr: expr, $enum:ident::$variant:ident) => {
+        if let $enum::$variant(x) = $expr { x } else { panic!() }
     }
 }
 
@@ -22,6 +24,25 @@ macro_rules! static_assert_size {
 
 pub type HashSet<K> = fxhash::FxHashSet<K>;
 pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
+
+pub fn sample<T>(xs: &[T]) -> &T {
+    assert!(!xs.is_empty());
+    &xs[random::<usize>() % xs.len()]
+}
+
+pub fn weighted<T>(xs: &[(i32, T)]) -> &T {
+    let total = xs.iter().fold(0, |acc, x| acc + x.0);
+    assert!(total > 0);
+    let mut value = (random::<usize>() % total as usize) as i32;
+    for (weight, choice) in xs {
+        value -= weight;
+        if value <= 0 { return choice; }
+    }
+    assert!(false);
+    &xs[xs.len() - 1].1
+}
+
+//////////////////////////////////////////////////////////////////////////////
 
 // Rendering helpers
 

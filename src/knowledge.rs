@@ -4,7 +4,8 @@ use std::rc::Rc;
 
 use crate::static_assert_size;
 use crate::base::{FOV, Glyph, HashMap, Matrix, Point, clamp};
-use crate::entity::{EID, Entity, PokemonIndividualData, PokemonSpeciesData};
+use crate::entity::{EID, Entity, PokemonEdge};
+use crate::entity::{PokemonIndividualData, PokemonSpeciesData};
 use crate::game::{BoardView, Tile, MOVE_TIMER};
 use crate::pathing::Status;
 
@@ -114,6 +115,7 @@ pub struct PokemonView {
 pub struct TrainerView {
     pub hp: f64,
     pub name: Rc<str>,
+    pub status: Vec<bool>,
 }
 
 pub enum EntityView {
@@ -122,7 +124,9 @@ pub enum EntityView {
 }
 
 impl Default for EntityView {
-    fn default() -> Self { Self::Trainer(TrainerView { hp: 0., name: "".into() }) }
+    fn default() -> Self {
+        Self::Trainer(TrainerView { hp: 0., name: "".into(), status: vec![] })
+    }
 }
 
 pub fn get_hp(me: &PokemonIndividualData) -> f64 {
@@ -133,7 +137,7 @@ pub fn get_pp(entity: &Entity) -> f64 {
     1. - clamp(entity.move_timer as f64 / MOVE_TIMER as f64, 0., 1.)
 }
 
-fn get_view(entity: &Entity) -> EntityView {
+pub fn get_view(entity: &Entity, view: &BoardView) -> EntityView {
     match entity {
         Entity::Pokemon(x) => {
             let species = x.data.me.species;
@@ -144,7 +148,14 @@ fn get_view(entity: &Entity) -> EntityView {
         Entity::Trainer(x) => {
             let name = x.data.name.clone();
             let hp = x.data.cur_hp as f64 / max(x.data.max_hp, 1) as f64;
-            EntityView::Trainer(TrainerView { hp, name })
+            let status = x.data.pokemon.iter().map(|x| {
+                let me = match &x {
+                    PokemonEdge::In(x) => Some(&**x),
+                    PokemonEdge::Out(x) => view.get_entity(*x).map(|x| &*x.data.me),
+                };
+                me.map(|x| x.cur_hp > 0).unwrap_or(false)
+            }).collect();
+            EntityView::Trainer(TrainerView { hp, name, status })
         }
     }
 }
@@ -175,7 +186,6 @@ pub struct EntityKnowledge {
     pub player: bool,
     pub view: EntityView,
 }
-static_assert_size!(EntityKnowledge, 72);
 
 #[derive(Default)]
 pub struct Knowledge {
@@ -275,7 +285,7 @@ impl Knowledge {
                 entry.rival = species.is_some() && species != my_species;
                 entry.friend = other.trainer() == my_trainer;
                 entry.player = other.player;
-                entry.view = get_view(other);
+                entry.view = get_view(other, view);
 
                 Some(index)
             })();

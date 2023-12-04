@@ -112,7 +112,13 @@ pub struct PokemonArgs<'a> {
     pub pos: Point,
     pub dir: Point,
     pub species: &'a str,
-    pub trainer: Option<TID>,
+}
+
+pub struct SummonArgs {
+    pub pos: Point,
+    pub dir: Point,
+    pub me: Box<PokemonIndividualData>,
+    pub trainer: TID,
 }
 
 pub struct TrainerArgs<'a> {
@@ -137,8 +143,25 @@ fn individual(species: &str, trainer: Option<TID>) -> Box<PokemonIndividualData>
 fn pokemon(eid: EID, args: &PokemonArgs) -> Entity {
     let data = PokemonData {
         ai: Cell::default(),
-        me: individual(args.species, args.trainer),
+        me: individual(args.species, None),
     };
+    let entity = EntityData {
+        eid,
+        player: false,
+        removed: false,
+        move_timer: 0,
+        turn_timer: 0,
+        glyph: data.me.species.glyph,
+        speed: data.me.species.speed,
+        dir: args.dir,
+        pos: args.pos,
+        known: Box::default(),
+    };
+    Entity::Pokemon(Pokemon { entity, data: Box::new(data) })
+}
+
+fn summons(eid: EID, args: SummonArgs) -> Entity {
+    let data = PokemonData { ai: Cell::default(), me: args.me };
     let entity = EntityData {
         eid,
         player: false,
@@ -343,6 +366,10 @@ impl EntityMap {
 
     pub fn add_pokemon(&mut self, args: &PokemonArgs) -> PID {
         PID(to_eid(self.map.insert_with_key(|x| pokemon(to_eid(x), args))))
+    }
+
+    pub fn add_summons(&mut self, args: SummonArgs) -> PID {
+        PID(to_eid(self.map.insert_with_key(|x| summons(to_eid(x), args))))
     }
 
     pub fn add_trainer(&mut self, args: &TrainerArgs) -> TID {

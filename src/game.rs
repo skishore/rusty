@@ -5,11 +5,13 @@ use std::ops::{Deref, DerefMut};
 use lazy_static::lazy_static;
 use rand::random;
 
-use crate::static_assert_size;
+use crate::{cast, static_assert_size};
 use crate::base::{Buffer, Color, Glyph, Slice};
-use crate::base::{HashMap, LOS, Matrix, Point, Rect, clamp};
+use crate::base::{HashMap, LOS, Matrix, Point, Rect};
+use crate::base::{clamp, sample, weighted};
 use crate::entity::{EID, PID, TID, EntityMap, EntityMapKey};
-use crate::entity::{Entity, Pokemon, PokemonArgs, Trainer, TrainerArgs};
+use crate::entity::{Entity, Pokemon, Trainer};
+use crate::entity::{PokemonArgs, SummonArgs, TrainerArgs};
 use crate::entity::{PokemonEdge, PokemonIndividualData, PokemonSpeciesData};
 use crate::knowledge::{Knowledge, Vision, VisionArgs, get_pp, get_hp};
 use crate::knowledge::{CellKnowledge, EntityKnowledge, EntityView, PokemonView};
@@ -113,8 +115,8 @@ impl BoardView {
         self.entity_order[self.active_entity_index]
     }
 
-    pub fn get_entity(&self, eid: EID) -> Option<&Entity> {
-        self.entities.get(eid)
+    pub fn get_entity<T: EntityMapKey>(&self, id: T) -> Option<&T::ValueType> {
+        self.entities.get(id)
     }
 
     pub fn get_entity_at(&self, p: Point) -> Option<EID> {
@@ -188,6 +190,10 @@ impl Board {
         if self.logs.len() as i32 > UI_LOG_SIZE { self.logs.remove(0); }
     }
 
+    fn end_menu_logging(&mut self) {
+        self.logs.last_mut().map(|x| x.menu = false);
+    }
+
     // Knowledge
 
     fn set_focus(&mut self, eid: EID, focus: Option<EID>) {
@@ -213,6 +219,13 @@ impl Board {
     fn add_pokemon(&mut self, args: &PokemonArgs) -> PID {
         let pid = self.entities.add_pokemon(args);
         self._add_to_caches(pid.eid(), args.pos);
+        pid
+    }
+
+    fn add_summoned_pokemon(&mut self, args: SummonArgs) -> PID {
+        let pos = args.pos;
+        let pid = self.entities.add_summons(args);
+        self._add_to_caches(pid.eid(), pos);
         pid
     }
 
@@ -245,6 +258,15 @@ impl Board {
         let collider = self.base.entity_at_pos.insert(to, existing);
         assert!(collider.is_none());
         entity.pos = to;
+    }
+
+    fn swap_entities(&mut self, a: Point, b: Point) {
+        assert!(a != b);
+        let ea = self.base.entity_at_pos.remove(&a).unwrap();
+        let eb = self.base.entity_at_pos.insert(b, ea).unwrap();
+        self.base.entity_at_pos.insert(a, eb);
+        self.base.entities[ea].pos = b;
+        self.base.entities[eb].pos = a;
     }
 
     fn remove_entity(&mut self, eid: EID) {
@@ -366,24 +388,6 @@ fn mapgen(map: &mut Matrix<&'static Tile>) {
 
 // Targeting UI
 
-fn check_follower_square(known: &Knowledge, leader: &Trainer,
-                         target: Point, ignore_occupant: bool) -> bool {
-    let free = match known.get_status(target).unwrap_or(Status::Blocked) {
-        Status::Free => true,
-        Status::Blocked => false,
-        Status::Occupied => ignore_occupant,
-    };
-    if !free { return false }
-
-    let source = leader.pos;
-    let length = (source - target).len_nethack();
-    if length > 2 { return false; }
-    if length < 2 { return true; }
-
-    let vision = |p: Point| { known.get_cell(p).map(|x| x.visibility).unwrap_or(-1) };
-    vision(source) == vision(target)
-}
-
 fn can_target(entity: &EntityKnowledge) -> bool {
     entity.age == 0 && !entity.friend
 }
@@ -477,7 +481,8 @@ fn select_valid_target(state: &mut State) -> Option<EID> {
             let entity = entity?;
             if can_target(entity) { Some(entity.eid) } else { None }
         }
-        TargetData::Summon(_) => {
+        TargetData::Summon(x) => {
+            state.input = Action::Summon(*x, target.target);
             known.focus
         }
     }
@@ -493,6 +498,7 @@ pub enum Action {
     Idle,
     Look(Point),
     Move(MoveData),
+    Summon(usize, Point),
     WaitForInput,
 }
 
@@ -508,15 +514,24 @@ impl ActionResult {
     fn success_turns(turns: f64) -> Self { Self { success: true,  moves: 0., turns } }
 }
 
-fn sample<T>(xs: &[T]) -> &T {
-    assert!(!xs.is_empty());
-    &xs[random::<usize>() % xs.len()]
-}
-
 fn charge(entity: &mut Entity) {
     let charge = (TURN_TIMER as f64 * entity.speed).round() as i32;
     if entity.move_timer > 0 { entity.move_timer -= charge; }
     if entity.turn_timer > 0 { entity.turn_timer -= charge; }
+}
+
+fn name(me: &PokemonIndividualData) -> &'static str {
+    me.species.name
+}
+
+fn shout(board: &mut Board, tid: TID, text: &str) {
+    let entity = &board.entities[tid];
+    if entity.player {
+        board.log_menu(format!("You shout: \"{}\"", text), 0x231);
+        board.end_menu_logging();
+    } else {
+        board.log_menu(format!("{} shouts: \"{}\"", entity.data.name, text), 0x234);
+    }
 }
 
 fn move_ready(entity: &Entity) -> bool { entity.move_timer <= 0 }
@@ -686,7 +701,7 @@ fn flight(entity: &Entity, source: Point) -> Option<Action> {
     Some(Action::Move(MoveData { dir: *sample(&best_steps), turns: 1.5 }))
 }
 
-fn plan_pokemon(pokemon: &Pokemon) -> Action {
+fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
     let mut ai = pokemon.data.ai.take().unwrap_or(Box::default());
     let prey = pokemon.data.me.species.name == "Pidgey";
 
@@ -757,12 +772,65 @@ fn plan_pokemon(pokemon: &Pokemon) -> Action {
     action
 }
 
-fn plan(entity: &Entity, input: &mut Action) -> Action {
+fn check_follower_square(known: &Knowledge, leader: &Trainer,
+                         target: Point, ignore_occupant: bool) -> bool {
+    let free = match known.get_status(target).unwrap_or(Status::Blocked) {
+        Status::Free => true,
+        Status::Blocked => false,
+        Status::Occupied => ignore_occupant,
+    };
+    if !free { return false }
+
+    let source = leader.pos;
+    let length = (source - target).len_nethack();
+    if length > 2 { return false; }
+    if length < 2 { return true; }
+
+    let vision = |p: Point| { known.get_cell(p).map(|x| x.visibility).unwrap_or(-1) };
+    vision(source) == vision(target)
+}
+
+fn follow_leader(pokemon: &Pokemon, trainer: &Trainer) -> Action {
+    // TODO(shaunak): Combine our knowledge and our leader's here.
+    let known = &*trainer.known;
+    let (pp, tp) = (pokemon.pos, trainer.pos);
+    let okay = |p: Point| check_follower_square(known, trainer, p, p == pp);
+
+    if (pp - tp).len_nethack() <= 3 {
+        let mut moves: Vec<_> = DIRECTIONS.iter().filter_map(
+            |x| if okay(pp + *x) { Some((1, *x)) } else { None }).collect();
+        if okay(pp) { moves.push((16, Point::default())); }
+        if !moves.is_empty() {
+            let dir = *weighted(&moves);
+            return Action::Move(MoveData { dir, turns: 1. });
+        }
+    }
+
+    let check = |p: Point| known.get_status(p).unwrap_or(Status::Occupied);
+    let path = AStar(pp, tp, ASTAR_LIMIT_ATTACK, check);
+    let dir = if let Some(path) = path && !path.is_empty() {
+        path[0] - pp
+    } else {
+        *sample(&DIRECTIONS)
+    };
+    Action::Move(MoveData { dir, turns: 1. })
+}
+
+fn plan_pokemon(board: &Board, pokemon: &Pokemon) -> Action {
+    let trainer = match pokemon.data.me.trainer {
+        Some(tid) => &board.entities[tid],
+        None => return plan_wild_pokemon(pokemon),
+    };
+    follow_leader(pokemon, trainer)
+}
+
+fn plan(board: &Board, eid: EID, input: &mut Action) -> Action {
+    let entity = &board.entities[eid];
     if entity.player {
         return std::mem::replace(input, Action::WaitForInput);
     }
     match entity {
-        Entity::Pokemon(x) => plan_pokemon(x),
+        Entity::Pokemon(x) => plan_pokemon(board, x),
         Entity::Trainer(_) => Action::Idle,
     }
 }
@@ -779,14 +847,59 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             if dir == Point::default() {
                 return ActionResult::success_turns(turns);
             }
-            let entity = &mut state.board.entities[eid];
+            let entity = &state.board.entities[eid];
+            let player = entity.player;
             let target = entity.pos + dir;
-            entity.dir = dir;
-            if state.board.get_status(target) == Status::Free {
-                state.board.move_entity(eid, target);
-                return ActionResult::success_turns(turns);
+            let source = entity.pos;
+            match state.board.get_status(target) {
+                Status::Blocked => ActionResult::failure(),
+                Status::Occupied => {
+                    let other = state.board.get_entity_at(target);
+                    let other = other.map(|x| &state.board.entities[x]);
+                    if let Some(Entity::Pokemon(x)) = other &&
+                       x.data.me.trainer.map(|x| x.eid()) == Some(eid) {
+                        if player {
+                            state.board.log(format!(
+                                "You swap places with {}.", name(&x.data.me)));
+                        }
+                        state.board.swap_entities(source, target);
+                        state.board.entities[eid].dir = dir;
+                    }
+                    ActionResult::failure()
+                }
+                Status::Free => {
+                    state.board.entities[eid].dir = dir;
+                    state.board.move_entity(eid, target);
+                    ActionResult::success_turns(turns)
+                }
             }
-            ActionResult::failure()
+        }
+        Action::Summon(index, target) => {
+            let trainer = match &state.board.entities[eid] {
+                Entity::Trainer(x) => x,
+                _ => return ActionResult::failure(),
+            };
+            let tid = trainer.id();
+            let name = match trainer.data.pokemon.get(index) {
+                Some(PokemonEdge::In(x)) if x.cur_hp > 0 => name(x),
+                _ => return ActionResult::failure(),
+            };
+            if state.board.get_status(target) != Status::Free {
+                return ActionResult::failure();
+            }
+
+            shout(&mut state.board, tid, &format!("Go! {}!", name));
+
+            let trainer = cast!(&mut state.board.entities[eid], Entity::Trainer);
+            let me = cast!(trainer.data.pokemon.remove(index), PokemonEdge::In);
+            let dir = target - trainer.pos;
+            let arg = SummonArgs { pos: target, dir, me, trainer: trainer.id() };
+            let pid = state.board.add_summoned_pokemon(arg);
+            let trainer = cast!(&mut state.board.entities[eid], Entity::Trainer);
+            trainer.data.pokemon.insert(index, PokemonEdge::Out(pid));
+            trainer.data.summons.push(pid);
+
+            ActionResult::success()
         }
     }
 }
@@ -812,8 +925,6 @@ fn process_input(state: &mut State, input: Input) {
 
     let tab = input == Input::Char('\t') || input == Input::BackTab;
     let enter = input == Input::Char('\n') || input == Input::Char('.');
-
-    let name = |me: &PokemonIndividualData| -> &str { me.species.name };
 
     if let Some(x) = &mut state.choice {
         let choice = if enter {
@@ -1005,8 +1116,7 @@ fn update_state(state: &mut State) {
 
         state.board.update_known(eid);
         let player = eid == state.player.eid();
-        let entity = &state.board.entities[eid];
-        let action = plan(&entity, &mut state.input);
+        let action = plan(&state.board, eid, &mut state.input);
         let result = act(state, eid, action);
         update = true;
 
@@ -1234,9 +1344,10 @@ impl State {
             if let Some(pos) = pos(&board) {
                 let index = if i % 4 == 0 { 1 } else { 0 };
                 let (dir, species) = (*sample(&DIRECTIONS), options[index]);
-                board.add_pokemon(&PokemonArgs { pos, dir, species, trainer: None });
+                board.add_pokemon(&PokemonArgs { pos, dir, species });
             }
         }
+        board.update_known(tid.eid());
 
         Self {
             board,
@@ -1354,7 +1465,7 @@ impl State {
 
     fn render_log(&self, slice: &mut Slice) {
         for line in &self.board.logs {
-            slice.set_fg(Some(line.color)).write_str(&line.text);
+            slice.set_fg(Some(line.color)).write_str(&line.text).newline();
         }
     }
 
@@ -1392,15 +1503,18 @@ impl State {
         if let Some(entity) = trainer.known.get_view_of(trainer.id().eid()) {
             self.render_entity(Some(PLAYER_KEY), None, entity, slice);
         }
-        for (_, key) in SUMMON_KEYS.iter().enumerate() {
-            self.render_empty_option(*key, 0, slice);
+        for (i, key) in SUMMON_KEYS.iter().enumerate() {
+            let eid = trainer.data.summons.get(i).map(|x| x.eid());
+            if let Some(entity) = eid.and_then(|x| trainer.known.get_view_of(x)) {
+                self.render_entity(Some(*key), None, entity, slice);
+            } else {
+                self.render_empty_option(*key, 0, slice);
+            }
         }
     }
 
     fn render_target(&self, trainer: &Trainer, slice: &mut Slice) {
         let known = &*trainer.known;
-        let name = |me: &PokemonIndividualData| -> &str { me.species.name };
-
         if self.target.is_none() && known.focus.is_none() {
             let fg = Some(0x111.into());
             slice.newline();
@@ -1542,6 +1656,13 @@ impl State {
                 let name = if entity.player { "You" } else { &x.name };
                 slice.set_fg(fg).write_str(&prefix).write_str(name).newline();
                 status_bar_line("HP: ", x.hp, hp_color, slice);
+                slice.set_fg(fg).spaces(n + 5);
+                for status in &x.status {
+                    let color = if *status { Color::default() } else { 0x111.into() };
+                    slice.write_chr(Glyph::chfg('*', color));
+                    slice.spaces(1);
+                }
+                slice.newline();
             }
         }
         slice.newline();
