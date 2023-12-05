@@ -752,20 +752,20 @@ fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
         AIState::Fight(x) => if x.age == 0 {
             Action::Look(x.target - pokemon.pos)
         } else {
-            explore_near(pokemon.base(), x.target, x.age, 1.)
+            explore_near(pokemon, x.target, x.age, 1.)
         }
-        AIState::Flight(x) => flight(pokemon.base(), x.target).unwrap_or_else(||{
+        AIState::Flight(x) => flight(pokemon, x.target).unwrap_or_else(||{
             let (target, time) = (x.target, ASSESS_TIME);
             let mut x = Assess { switch: min(x.age + 1, x.switch), target, time };
-            let result = assess(pokemon.base(), &mut x);
+            let result = assess(pokemon, &mut x);
             replacement = Some(AIState::Assess(x));
             result
         }),
         AIState::Wander(x) => {
             x.time -= 1;
-            explore_near(pokemon.base(), pokemon.pos, 9999, WANDER_TURNS)
+            explore_near(pokemon, pokemon.pos, 9999, WANDER_TURNS)
         }
-        AIState::Assess(ref mut x) => assess(pokemon.base(), x),
+        AIState::Assess(ref mut x) => assess(pokemon, x),
     };
     if let Some(x) = replacement { *ai = x; }
     pokemon.data.ai.set(Some(ai));
@@ -1587,7 +1587,7 @@ impl State {
             match if i < options.len() { Some(&options[i]) } else { None } {
                 Some(PokemonEdge::Out(x)) => {
                     let pokemon = &self.board.entities[*x];
-                    let (me, pp) = (&*pokemon.data.me, get_pp(pokemon.base()));
+                    let (me, pp) = (&*pokemon.data.me, get_pp(pokemon));
                     self.render_option(*key, 1, selected, me, pp, slice);
                 },
                 Some(PokemonEdge::In(x)) =>

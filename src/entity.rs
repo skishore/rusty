@@ -44,6 +44,13 @@ lazy_static! {
 // Entity data definitions
 
 #[repr(C)]
+pub enum Entity {
+    Pokemon(Pokemon),
+    Trainer(Trainer),
+}
+static_assert_size!(Entity, 72);
+
+#[repr(C)]
 pub struct EntityData {
     eid: EID,
     pub player: bool,
@@ -200,12 +207,6 @@ fn trainer(eid: EID, args: &TrainerArgs) -> Entity {
 
 // Impls and references
 
-#[repr(C)]
-pub enum Entity {
-    Pokemon(Pokemon),
-    Trainer(Trainer),
-}
-
 impl Deref for Entity {
     type Target = EntityData;
     #[inline(always)]
@@ -224,25 +225,37 @@ impl DerefMut for Entity {
 }
 
 impl Deref for Pokemon {
-    type Target = EntityData;
+    type Target = Entity;
     #[inline(always)]
-    fn deref(&self) -> &Self::Target { &self.entity }
+    fn deref(&self) -> &Self::Target {
+        let base = self as *const Self as *const u8;
+        unsafe { &*(base.offset(-TYPED_ENTITY_OFFSET) as *const Entity) }
+    }
 }
 
 impl Deref for Trainer {
-    type Target = EntityData;
+    type Target = Entity;
     #[inline(always)]
-    fn deref(&self) -> &Self::Target { &self.entity }
+    fn deref(&self) -> &Self::Target {
+        let base = self as *const Self as *const u8;
+        unsafe { &*(base.offset(-TYPED_ENTITY_OFFSET) as *const Entity) }
+    }
 }
 
 impl DerefMut for Pokemon {
     #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.entity }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let base = self as *mut Self as *mut u8;
+        unsafe { &mut *(base.offset(-TYPED_ENTITY_OFFSET) as *mut Entity) }
+    }
 }
 
 impl DerefMut for Trainer {
     #[inline(always)]
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.entity }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        let base = self as *mut Self as *mut u8;
+        unsafe { &mut *(base.offset(-TYPED_ENTITY_OFFSET) as *mut Entity) }
+    }
 }
 
 impl Entity {
@@ -265,20 +278,10 @@ impl Entity {
 
 impl Pokemon {
     pub fn id(&self) -> PID { PID(self.eid) }
-
-    pub fn base(&self) -> &Entity {
-        let base = self as *const Self as *const u8;
-        unsafe { &*(base.offset(-TYPED_ENTITY_OFFSET) as *const Entity) }
-    }
 }
 
 impl Trainer {
     pub fn id(&self) -> TID { TID(self.eid) }
-
-    pub fn base(&self) -> &Entity {
-        let base = self as *const Self as *const u8;
-        unsafe { &*(base.offset(-TYPED_ENTITY_OFFSET) as *const Entity) }
-    }
 
     pub fn register_pokemon(&mut self, species: &str) {
         let me = individual(species, Some(self.id()));
