@@ -127,7 +127,7 @@ impl Glyph {
 
 //////////////////////////////////////////////////////////////////////////////
 
-// Geometry helpers
+// Point and Direction
 
 pub fn clamp<T: PartialOrd>(x: T, min: T, max: T) -> T {
     if x < min { min } else if x > max { max } else { x }
@@ -142,6 +142,10 @@ impl Point {
         let (ax, ay) = (self.0.abs() as i64, self.1.abs() as i64);
         let (min, max) = (std::cmp::min(ax, ay), std::cmp::max(ax, ay));
         ((46 * min + 95 * max + 25) / 100) as i32
+    }
+
+    pub fn len_taxicab(&self) -> i32 {
+        self.0.abs() + self.1.abs()
     }
 
     pub fn len_l2(&self) -> f64 {
@@ -171,6 +175,26 @@ impl std::ops::Sub for Point {
         Point(self.0 - other.0, self.1 - other.1)
     }
 }
+
+pub mod dirs {
+    use crate::base::Point;
+
+    pub const NONE: Point = Point( 0,  0);
+    pub const N:    Point = Point( 0, -1);
+    pub const S:    Point = Point( 0,  1);
+    pub const E:    Point = Point( 1,  0);
+    pub const W:    Point = Point(-1,  0);
+    pub const NE:   Point = Point( 1, -1);
+    pub const NW:   Point = Point(-1, -1);
+    pub const SE:   Point = Point( 1,  1);
+    pub const SW:   Point = Point(-1,  1);
+
+    pub const ALL: [Point; 8] = [N, S, E, W, NE, NW, SE, SW];
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+// Matrix
 
 #[derive(Clone, Default)]
 pub struct Matrix<T> {

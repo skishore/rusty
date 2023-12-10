@@ -3,6 +3,7 @@
 
 mod base;
 mod game;
+mod effect;
 mod entity;
 mod knowledge;
 mod pathing;

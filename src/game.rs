@@ -9,6 +9,7 @@ use crate::{cast, static_assert_size};
 use crate::base::{Buffer, Color, Glyph, Slice};
 use crate::base::{HashMap, LOS, Matrix, Point, Rect};
 use crate::base::{clamp, sample, weighted};
+use crate::effect::BoardLike;
 use crate::entity::{EID, PID, TID, EntityMap, EntityMapKey};
 use crate::entity::{Entity, Pokemon, Trainer};
 use crate::entity::{PokemonArgs, SummonArgs, TrainerArgs};
@@ -96,6 +97,17 @@ pub struct BoardView {
     entity_at_pos: HashMap<Point, EID>,
     entity_order: Vec<EID>,
     entities: EntityMap,
+}
+
+impl BoardLike for BoardView {
+    fn get_glyph_at(&self, p: Point) -> Glyph {
+        let entity = self.get_entity_at(p).and_then(|x| self.get_entity(x));
+        entity.map(|x| x.glyph).unwrap_or(self.get_underlying_glyph_at(p))
+    }
+
+    fn get_underlying_glyph_at(&self, p: Point) -> Glyph {
+        self.get_tile_at(p).glyph
+    }
 }
 
 impl BoardView {

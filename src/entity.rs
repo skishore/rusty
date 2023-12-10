@@ -9,7 +9,8 @@ use slotmap::{DefaultKey, Key, KeyData, SlotMap};
 
 use crate::{cast, static_assert_size};
 use crate::base::{Glyph, HashMap, Point};
-use crate::game::AIState;
+use crate::effect::{Effect, self};
+use crate::game::{AIState, BoardView};
 use crate::knowledge::Knowledge;
 
 //////////////////////////////////////////////////////////////////////////////
@@ -21,19 +22,42 @@ const TRAINER_SPEED: f64 = 0.10;
 const TYPED_ENTITY_OFFSET: isize = 8;
 
 lazy_static! {
-    static ref POKEMON_SPECIES: HashMap<&'static str, PokemonSpeciesData> = {
-        let items = [
-            ("Bulbasaur",  90, 0.17, Glyph::wdfg('B', 0x020)),
-            ("Charmander", 80, 0.20, Glyph::wdfg('C', 0x410)),
-            ("Squirtle",   70, 0.25, Glyph::wdfg('S', 0x234)),
-            ("Eevee",      80, 0.20, Glyph::wdfg('E', 0x420)),
-            ("Pikachu",    60, 0.25, Glyph::wdfg('P', 0x440)),
-            ("Pidgey",     30, 0.33, Glyph::wide('P')),
-            ("Ratatta",    60, 0.25, Glyph::wide('R')),
+    static ref ATTACKS: HashMap<&'static str, Attack> = {
+        let items: Vec<(&str, i32, i32, GenEffect)> = vec![
+            ("Ember",    12, 40, Box::new(&effect::EmberEffect)),
+            ("Ice Beam", 12, 60, Box::new(&effect::IceBeamEffect)),
+            ("Blizzard", 12, 80, Box::new(&effect::BlizzardEffect)),
+            ("Headbutt",  8, 80, Box::new(&effect::HeadbuttEffect)),
+            ("Tackle",    4, 40, Box::new(&effect::HeadbuttEffect)),
         ];
         let mut result = HashMap::default();
-        for (name, hp, speed, glyph) in items {
-            result.insert(name, PokemonSpeciesData { name, glyph, speed, hp });
+        for (name, range, damage, effect) in items {
+            result.insert(name, Attack { name, range, damage, effect });
+        }
+        result
+    };
+}
+
+lazy_static! {
+    static ref POKEMON_SPECIES:
+            HashMap<&'static str, (PokemonSpeciesData, Vec<&'static Attack>)> = {
+        let items = [
+            ("Bulbasaur",  90, 0.17, Glyph::wdfg('B', 0x020), vec![]),
+            ("Charmander", 80, 0.20, Glyph::wdfg('C', 0x410), vec!["Ember"]),
+            ("Squirtle",   70, 0.25, Glyph::wdfg('S', 0x234), vec!["Ice Beam"]),
+            ("Eevee",      80, 0.20, Glyph::wdfg('E', 0x420), vec!["Headbutt"]),
+            ("Pikachu",    60, 0.25, Glyph::wdfg('P', 0x440), vec![]),
+            ("Pidgey",     30, 0.33, Glyph::wide('P'), vec![]),
+            ("Ratatta",    60, 0.25, Glyph::wide('R'), vec!["Headbutt"]),
+        ];
+        let mut result = HashMap::default();
+        for (name, hp, speed, glyph, attacks) in items {
+            let attacks = attacks.iter().chain(&["Tackle"])
+                .map(|x| ATTACKS.get(x).unwrap_or_else(
+                        || panic!("Unknown attack: {}", x)))
+                .collect::<Vec<_>>();
+            let species = PokemonSpeciesData { name, glyph, speed, hp };
+            result.insert(name, (species, attacks));
         }
         result
     };
@@ -79,6 +103,15 @@ pub struct Trainer {
 }
 static_assert_size!(Trainer, 64);
 
+pub type GenEffect = Box<dyn Fn(&BoardView, Point, Point) -> Effect + Send + Sync>;
+
+pub struct Attack {
+    pub name: &'static str,
+    pub range: i32,
+    pub damage: i32,
+    pub effect: GenEffect,
+}
+
 pub struct PokemonSpeciesData {
     pub name: &'static str,
     pub glyph: Glyph,
@@ -87,6 +120,7 @@ pub struct PokemonSpeciesData {
 }
 
 pub struct PokemonIndividualData {
+    pub attacks: Vec<&'static Attack>,
     pub species: &'static PokemonSpeciesData,
     pub trainer: Option<TID>,
     pub cur_hp: i32,
@@ -136,9 +170,10 @@ pub struct TrainerArgs<'a> {
 }
 
 fn individual(species: &str, trainer: Option<TID>) -> Box<PokemonIndividualData> {
-    let species = POKEMON_SPECIES.get(species).unwrap_or_else(
+    let (species, attacks) = POKEMON_SPECIES.get(species).unwrap_or_else(
         || panic!("Unknown Pokemon species: {}", species));
     let me = PokemonIndividualData {
+        attacks: attacks.clone(),
         species,
         trainer,
         cur_hp: species.hp,
