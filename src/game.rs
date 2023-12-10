@@ -7,7 +7,7 @@ use rand::random;
 
 use crate::{cast, static_assert_size};
 use crate::base::{Buffer, Color, Glyph, Slice};
-use crate::base::{HashMap, LOS, Matrix, Point, Rect};
+use crate::base::{HashMap, LOS, Matrix, Point, Rect, dirs};
 use crate::base::{clamp, sample, weighted};
 use crate::effect::{Effect, Event, Frame, FT, ray_character, self};
 use crate::entity::{EID, PID, TID, EntityMap, EntityMapKey};
@@ -17,7 +17,7 @@ use crate::entity::{PokemonEdge, PokemonIndividualData, PokemonSpeciesData};
 use crate::knowledge::{Knowledge, Vision, VisionArgs, get_pp, get_hp};
 use crate::knowledge::{CellKnowledge, EntityKnowledge, EntityView, PokemonView};
 use crate::pathing::{AStar, DijkstraMap, DijkstraMode};
-use crate::pathing::{DIRECTIONS, BFS, BFSResult, Status};
+use crate::pathing::{BFS, BFSResult, Status};
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -36,6 +36,7 @@ const MAX_FOLLOW_TIME: i32 = 64;
 const FOV_RADIUS_NPC: i32 = 12;
 const FOV_RADIUS_PC_: i32 = 21;
 
+const SUMMON_RANGE: i32 = 12;
 const WANDER_TURNS: f64 = 3.;
 const WORLD_SIZE: i32 = 100;
 
@@ -504,13 +505,15 @@ fn update_target(known: &Knowledge, target: &mut Target, update: Point) {
                 target.error = "You can't see a clear path there.".into();
             }
         }
-        TargetData::Summon(_) => {
+        TargetData::Summon { range, .. } => {
             if target.path.is_empty() {
                 target.error = "There's something in the way.".into();
             }
             for (i, x) in target.path.iter().enumerate() {
                 if known.get_status(x.0).unwrap_or(Status::Free) != Status::Free {
                     target.error = "There's something in the way.".into();
+                } else if !(x.0 - target.source).in_l2_range(*range) {
+                    target.error = "You can't throw that far.".into();
                 } else if !known.can_see_now(x.0) {
                     target.error = "You can't see a clear path there.".into();
                 }
@@ -535,8 +538,8 @@ fn select_valid_target(state: &mut State) -> Option<EID> {
             let entity = entity?;
             if can_target(entity) { Some(entity.eid) } else { None }
         }
-        TargetData::Summon(x) => {
-            state.input = Action::Summon(*x, target.target);
+        TargetData::Summon { index, .. } => {
+            state.input = Action::Summon(*index, target.target);
             known.focus
         }
     }
@@ -669,10 +672,10 @@ fn explore_near(entity: &Entity, source: Point, age: i32, turns: f64) -> Action 
     let done1 = |p: Point| {
         let cell = known.get_cell(p);
         if cell.map(|x| x.age <= age).unwrap_or(false) { return false; }
-        DIRECTIONS.iter().any(|x| known.unblocked(p + *x))
+        dirs::ALL.iter().any(|x| known.unblocked(p + *x))
     };
     let done0 = |p: Point| {
-        done1(p) && DIRECTIONS.iter().all(|x| !known.blocked(p + *x))
+        done1(p) && dirs::ALL.iter().all(|x| !known.blocked(p + *x))
     };
 
     let result = BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
@@ -691,7 +694,7 @@ fn explore_near(entity: &Entity, source: Point, age: i32, turns: f64) -> Action 
         Some(path[0] - pos)
     })();
 
-    let dir = dir.unwrap_or_else(|| *sample(&DIRECTIONS));
+    let dir = dir.unwrap_or_else(|| *sample(&dirs::ALL));
     Action::Move(MoveData { dir, turns })
 }
 
@@ -731,7 +734,7 @@ fn flight(entity: &Entity, source: Point) -> Option<Action> {
     DijkstraMap(DijkstraMode::Expand(limit), check, 1, &mut map);
 
     for (pos, val) in map.iter_mut() {
-        let frontier = DIRECTIONS.iter().any(|x| !known.remembers(*pos + *x));
+        let frontier = dirs::ALL.iter().any(|x| !known.remembers(*pos + *x));
         if frontier { *val += FOV_RADIUS_NPC; }
         *val *= -10;
     }
@@ -741,7 +744,7 @@ fn flight(entity: &Entity, source: Point) -> Option<Action> {
     let mut best_steps = vec![Point::default()];
     let mut best_score = lookup(&pos);
 
-    for dir in &DIRECTIONS {
+    for dir in &dirs::ALL {
         let option = pos + *dir;
         if check(option) != Status::Free { continue; }
         let score = lookup(&option);
@@ -851,7 +854,7 @@ fn follow_leader(pokemon: &Pokemon, trainer: &Trainer) -> Action {
     let okay = |p: Point| check_follower_square(known, trainer, p, p == pp);
 
     if (pp - tp).len_nethack() <= 3 {
-        let mut moves: Vec<_> = DIRECTIONS.iter().filter_map(
+        let mut moves: Vec<_> = dirs::ALL.iter().filter_map(
             |x| if okay(pp + *x) { Some((1, *x)) } else { None }).collect();
         if okay(pp) { moves.push((16, Point::default())); }
         if !moves.is_empty() {
@@ -861,12 +864,8 @@ fn follow_leader(pokemon: &Pokemon, trainer: &Trainer) -> Action {
     }
 
     let check = |p: Point| known.get_status(p).unwrap_or(Status::Occupied);
-    let path = AStar(pp, tp, ASTAR_LIMIT_ATTACK, check);
-    let dir = if let Some(path) = path && !path.is_empty() {
-        path[0] - pp
-    } else {
-        *sample(&DIRECTIONS)
-    };
+    let path = AStar(pp, tp, ASTAR_LIMIT_ATTACK, check).unwrap_or_default();
+    let dir = if !path.is_empty() { path[0] - pp } else { *sample(&dirs::ALL) };
     Action::Move(MoveData { dir, turns: 1. })
 }
 
@@ -985,15 +984,15 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
 
 fn get_direction(ch: char) -> Option<Point> {
     match ch {
-        'h' => Some(Point(-1,  0)),
-        'j' => Some(Point( 0,  1)),
-        'k' => Some(Point( 0, -1)),
-        'l' => Some(Point( 1,  0)),
-        'y' => Some(Point(-1, -1)),
-        'u' => Some(Point( 1, -1)),
-        'b' => Some(Point(-1,  1)),
-        'n' => Some(Point( 1,  1)),
-        '.' => Some(Point( 0,  0)),
+        'h' => Some(dirs::W),
+        'j' => Some(dirs::S),
+        'k' => Some(dirs::N),
+        'l' => Some(dirs::E),
+        'y' => Some(dirs::NW),
+        'u' => Some(dirs::NE),
+        'b' => Some(dirs::SW),
+        'n' => Some(dirs::SE),
+        '.' => Some(dirs::NONE),
         _ => None,
     }
 }
@@ -1031,7 +1030,8 @@ fn process_input(state: &mut State, input: Input) {
                 let error = format!("{} has no strength left!", name(x));
                 state.board.log_menu(error, 0x422);
             } else if let PokemonEdge::In(x) = &pokemon[choice] {
-                let target = init_summon_target(player, TargetData::Summon(choice));
+                let data = TargetData::Summon { index: choice, range: SUMMON_RANGE };
+                let target = init_summon_target(player, data);
                 let message = format!("Choose where to send out {}:", name(x));
                 state.board.log_menu(message, 0x234);
                 state.target = Some(target);
@@ -1371,7 +1371,7 @@ struct Focus {
 
 enum TargetData {
     FarLook,
-    Summon(usize),
+    Summon { index: usize, range: i32 },
 }
 
 struct Target {
@@ -1427,7 +1427,7 @@ impl State {
         for i in 0..20 {
             if let Some(pos) = pos(&board) {
                 let index = if i % 4 == 0 { 1 } else { 0 };
-                let (dir, species) = (*sample(&DIRECTIONS), options[index]);
+                let (dir, species) = (*sample(&dirs::ALL), options[index]);
                 board.add_pokemon(&PokemonArgs { pos, dir, species });
             }
         }
@@ -1466,14 +1466,21 @@ impl State {
         let offset = pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
         let unseen = Glyph::wide(' ');
 
+        let range = self.target.as_ref().and_then(|x| match &x.data {
+            TargetData::Summon { range, .. } => Some(*range),
+            _ => None,
+        });
+        let in_range = |p: Point| range.map(|x| (p - pos).in_l2_range(x)).unwrap_or(true);
+
         for y in 0..UI_MAP_SIZE_Y {
             for x in 0..UI_MAP_SIZE_X {
-                let point = Point(x, y);
-                let glyph = match known.get_cell(point + offset) {
+                let point = Point(x, y) + offset;
+                let glyph = match known.get_cell(point) {
                     Some(x) => if x.age > 0 {
                         x.tile.glyph.with_fg(Color::gray())
                     } else {
-                        known.get_entity(x).map(|y| y.glyph).unwrap_or(x.tile.glyph)
+                        let glyph = known.get_entity(x).map(|y| y.glyph).unwrap_or(x.tile.glyph);
+                        if in_range(point) { glyph } else { glyph.with_fg(Color::gray()) }
                     }
                     None => unseen
                 };
@@ -1624,8 +1631,8 @@ impl State {
                 let entity = cell.and_then(|x| known.get_entity(x));
                 let header = match &x.data {
                     TargetData::FarLook => "Examining...".into(),
-                    TargetData::Summon(x) => {
-                        let name = match &trainer.data.pokemon[*x] {
+                    TargetData::Summon { index, .. } => {
+                        let name = match &trainer.data.pokemon[*index] {
                             PokemonEdge::In(y) => name(y),
                             PokemonEdge::Out(y) =>
                                 name(&self.board.entities[*y].data.me),

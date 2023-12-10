@@ -3,6 +3,9 @@ name = "rusty"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+incremental = true
+
 [dependencies]
 fxhash = "0.2.1"
 game-loop = "1.0.0"

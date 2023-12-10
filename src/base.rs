@@ -138,6 +138,10 @@ pub struct Point(pub i32, pub i32);
 static_assert_size!(Point, 8);
 
 impl Point {
+    pub fn in_l2_range(&self, range: i32) -> bool {
+        self.len_l2() <= range as f64 - 0.5
+    }
+
     pub fn len_nethack(&self) -> i32 {
         let (ax, ay) = (self.0.abs() as i64, self.1.abs() as i64);
         let (min, max) = (std::cmp::min(ax, ay), std::cmp::max(ax, ay));
@@ -418,7 +422,7 @@ impl FOV {
     fn update(&mut self, node: usize, los: &Vec<Point>, i: usize) {
         let prev = los[i];
         assert!(self.nodes[node].next == prev);
-        if prev.len_l2() > (self.radius as f64) - 0.5 { return; }
+        if !prev.in_l2_range(self.radius) { return; }
         if i + 1 >= los.len() { return; }
 
         let next = los[i + 1];

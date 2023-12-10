@@ -1,26 +1,13 @@
 use std::cmp::{max, min};
 
-use crate::base::{HashMap, LOS, Matrix, Point};
-
-//////////////////////////////////////////////////////////////////////////////
-
-#[derive(Eq, PartialEq)]
-pub enum Status { Free, Blocked, Occupied }
-
-pub const DIRECTIONS: [Point; 8] = [
-    Point(-1,  0),
-    Point( 0,  1),
-    Point( 0, -1),
-    Point( 1,  0),
-    Point(-1, -1),
-    Point( 1, -1),
-    Point(-1,  1),
-    Point( 1,  1),
-];
+use crate::base::{HashMap, LOS, Matrix, Point, dirs};
 
 //////////////////////////////////////////////////////////////////////////////
 
 // BFS (breadth-first search)
+
+#[derive(Eq, PartialEq)]
+pub enum Status { Free, Blocked, Occupied }
 
 pub struct BFSResult {
     pub dirs: Vec<Point>,
@@ -46,7 +33,7 @@ pub fn BFS<F: Fn(Point) -> bool, G: Fn(Point) -> Status>(
 
     while i <= limit {
         for pp in &prev {
-            for dir in &DIRECTIONS {
+            for dir in &dirs::ALL {
                 let np = *pp + *dir;
                 let distance = distances.get(np);
                 if distance != kUnknown { continue; }
@@ -76,7 +63,7 @@ pub fn BFS<F: Fn(Point) -> bool, G: Fn(Point) -> Status>(
 
     while i > 0 {
         for pp in &prev {
-            for dir in &DIRECTIONS {
+            for dir in &dirs::ALL {
                 let np = *pp + *dir;
                 let distance = distances.get(np);
                 if distance != i { continue; }
@@ -319,7 +306,7 @@ pub fn AStar<F: Fn(Point) -> Status>(
             return Some(result);
         }
 
-        for dir in &DIRECTIONS {
+        for dir in &dirs::ALL {
             let next = prev_pos + *dir;
             let test = if next == target { Status::Free } else { check(next) };
             if test == Status::Blocked { continue; }
@@ -383,7 +370,7 @@ pub fn DijkstraMap<F: Fn(Point) -> Status>(
         let prev_val = heap.get_node(prev).score;
         result.insert(prev_pos, prev_val);
 
-        for dir in &DIRECTIONS {
+        for dir in &dirs::ALL {
             let next = prev_pos + *dir;
             if check(next) != Status::Free { continue; }
 
