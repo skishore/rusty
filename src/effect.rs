@@ -1,21 +1,15 @@
 use crate::base::{Color, HashSet, Glyph, LOS, Point, dirs, sample};
-
-//////////////////////////////////////////////////////////////////////////////
-
-pub trait BoardLike {
-    fn get_glyph_at(&self, p: Point) -> Glyph;
-    fn get_underlying_glyph_at(&self, p: Point) -> Glyph;
-}
+use crate::game::Board;
 
 //////////////////////////////////////////////////////////////////////////////
 
 // Types
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub enum FT { Fire, Ice, Hit, Summon, Withdraw }
 
 pub enum Event {
-    Callback { frame: i32, callback: Box<dyn Fn()> },
+    Callback { frame: i32, callback: Box<dyn Fn(&mut Board)> },
     Other { frame: i32, point: Point, what: FT },
 }
 
@@ -54,8 +48,9 @@ impl Effect {
         let mut result = Effect::default();
         let scale = |f: i32| (s * f as f64).round() as i32;
 
-        for event in self.events.into_iter() {
-            result.events.push(event.update_frame(scale));
+        for mut event in self.events.into_iter() {
+            event.update_frame(scale);
+            result.events.push(event);
         }
         for i in 0..(self.frames.len() as i32) {
             let (start, limit) = (scale(i), scale(i + 1));
@@ -112,8 +107,9 @@ impl Effect {
         let mut offset = 0;
         let mut result = Effect::default();
         for effect in effects.into_iter() {
-            for event in effect.events.into_iter() {
-                result.events.push(event.update_frame(|x| x + offset));
+            for mut event in effect.events.into_iter() {
+                event.update_frame(|x| x + offset);
+                result.events.push(event);
             }
             result.frames.extend(effect.frames.clone());
             offset += effect.frames.len() as i32;
@@ -123,19 +119,24 @@ impl Effect {
 }
 
 impl Event {
-    fn frame(&self) -> i32 {
+    pub fn frame(&self) -> i32 {
         match self {
             Event::Callback { frame, .. } => *frame,
             Event::Other { frame, .. } => *frame,
         }
     }
 
-    fn update_frame<F: FnOnce(i32) -> i32>(self, update: F) -> Event {
+    pub fn what(&self) -> Option<FT> {
         match self {
-            Event::Callback { frame, callback } =>
-                Event::Callback { frame: update(frame), callback },
-            Event::Other { frame, point, what } =>
-                Event::Other { frame: update(frame), point, what },
+            Event::Callback { .. } => None,
+            Event::Other { what, .. } => Some(*what),
+        }
+    }
+
+    pub fn update_frame<F: FnOnce(i32) -> i32>(&mut self, update: F) {
+        match self {
+            Event::Callback { frame, .. } => *frame = update(*frame),
+            Event::Other { frame, .. } => *frame = update(*frame),
         }
     }
 }
@@ -157,6 +158,15 @@ fn add_sparkle(effect: &mut Effect, sparkle: &Sparkle,
     frame
 }
 
+fn get_glyph_at(board: &Board, p: Point) -> Glyph {
+    let entity = board.get_entity_at(p).and_then(|x| board.get_entity(x));
+    entity.map(|x| x.glyph).unwrap_or(get_underlying_glyph_at(board, p))
+}
+
+fn get_underlying_glyph_at(board: &Board, p: Point) -> Glyph {
+    board.get_tile_at(p).glyph
+}
+
 fn random_delay(n: i32) -> i32 {
     let mut count = 1;
     let limit = (1.5 * n as f64).floor() as i32;
@@ -164,7 +174,7 @@ fn random_delay(n: i32) -> i32 {
     count
 }
 
-fn ray_character(source: Point, target: Point) -> char {
+pub fn ray_character(source: Point, target: Point) -> char {
     let Point(x, y) = source - target;
     let (ax, ay) = (x.abs(), y.abs());
     if ax > 2 * ay { return '-'; }
@@ -292,7 +302,7 @@ fn SwitchEffect(source: Point, target: Point) -> Effect {
 }
 
 #[allow(non_snake_case)]
-pub fn EmberEffect(_: &impl BoardLike, source: Point, target: Point) -> Effect {
+pub fn EmberEffect(_: &Board, source: Point, target: Point) -> Effect {
     let mut effect = Effect::default();
     let line = LOS(source, target);
 
@@ -329,7 +339,7 @@ pub fn EmberEffect(_: &impl BoardLike, source: Point, target: Point) -> Effect {
 }
 
 #[allow(non_snake_case)]
-pub fn IceBeamEffect(_: &impl BoardLike, source: Point, target: Point) -> Effect {
+pub fn IceBeamEffect(_: &Board, source: Point, target: Point) -> Effect {
     let mut effect = Effect::default();
     let line = LOS(source, target);
     let ray = ray_character(source, target).to_string();
@@ -361,7 +371,7 @@ pub fn IceBeamEffect(_: &impl BoardLike, source: Point, target: Point) -> Effect
 }
 
 #[allow(non_snake_case)]
-pub fn BlizzardEffect(_: &impl BoardLike, source: Point, target: Point) -> Effect {
+pub fn BlizzardEffect(_: &Board, source: Point, target: Point) -> Effect {
     let mut effect = Effect::default();
     let ray = ray_character(source, target).to_string();
 
@@ -404,9 +414,9 @@ pub fn BlizzardEffect(_: &impl BoardLike, source: Point, target: Point) -> Effec
 }
 
 #[allow(non_snake_case)]
-pub fn HeadbuttEffect(board: &impl BoardLike, source: Point, target: Point) -> Effect {
-    let glyph = board.get_glyph_at(source);
-    let underlying = board.get_underlying_glyph_at(source);
+pub fn HeadbuttEffect(board: &Board, source: Point, target: Point) -> Effect {
+    let glyph = get_glyph_at(board, source);
+    let underlying = get_underlying_glyph_at(board, source);
 
     let trail: Sparkle = vec![
         (2, "#", 0x444.into()),

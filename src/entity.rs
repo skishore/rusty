@@ -10,7 +10,7 @@ use slotmap::{DefaultKey, Key, KeyData, SlotMap};
 use crate::{cast, static_assert_size};
 use crate::base::{Glyph, HashMap, Point};
 use crate::effect::{Effect, self};
-use crate::game::{AIState, BoardView};
+use crate::game::{AIState, Board};
 use crate::knowledge::Knowledge;
 
 //////////////////////////////////////////////////////////////////////////////
@@ -103,7 +103,7 @@ pub struct Trainer {
 }
 static_assert_size!(Trainer, 64);
 
-pub type GenEffect = Box<dyn Fn(&BoardView, Point, Point) -> Effect + Send + Sync>;
+pub type GenEffect = Box<dyn Fn(&Board, Point, Point) -> Effect + Send + Sync>;
 
 pub struct Attack {
     pub name: &'static str,

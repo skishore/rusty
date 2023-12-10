@@ -9,7 +9,7 @@ use crate::{cast, static_assert_size};
 use crate::base::{Buffer, Color, Glyph, Slice};
 use crate::base::{HashMap, LOS, Matrix, Point, Rect};
 use crate::base::{clamp, sample, weighted};
-use crate::effect::BoardLike;
+use crate::effect::{Effect, Event, Frame, FT, ray_character, self};
 use crate::entity::{EID, PID, TID, EntityMap, EntityMapKey};
 use crate::entity::{Entity, Pokemon, Trainer};
 use crate::entity::{PokemonArgs, SummonArgs, TrainerArgs};
@@ -92,28 +92,17 @@ lazy_static! {
 // BoardView - a read-only Board
 
 pub struct BoardView {
-    map: Matrix<&'static Tile>,
+    _map: Matrix<&'static Tile>,
     active_entity_index: usize,
     entity_at_pos: HashMap<Point, EID>,
     entity_order: Vec<EID>,
     entities: EntityMap,
 }
 
-impl BoardLike for BoardView {
-    fn get_glyph_at(&self, p: Point) -> Glyph {
-        let entity = self.get_entity_at(p).and_then(|x| self.get_entity(x));
-        entity.map(|x| x.glyph).unwrap_or(self.get_underlying_glyph_at(p))
-    }
-
-    fn get_underlying_glyph_at(&self, p: Point) -> Glyph {
-        self.get_tile_at(p).glyph
-    }
-}
-
 impl BoardView {
     fn new(size: Point) -> Self {
         Self {
-            map: Matrix::new(size, Tile::get('#')),
+            _map: Matrix::new(size, Tile::get('#')),
             active_entity_index: 0,
             entity_at_pos: HashMap::default(),
             entity_order: vec![],
@@ -135,13 +124,17 @@ impl BoardView {
         self.entity_at_pos.get(&p).map(|x| *x)
     }
 
+    pub fn get_size(&self) -> Point {
+        self._map.size
+    }
+
     pub fn get_status(&self, p: Point) -> Status {
         if self.entity_at_pos.contains_key(&p) { return Status::Occupied; }
-        if self.map.get(p).blocked() { Status::Blocked } else { Status::Free }
+        if self._map.get(p).blocked() { Status::Blocked } else { Status::Free }
     }
 
     pub fn get_tile_at(&self, p: Point) -> &'static Tile {
-        self.map.get(p)
+        self._map.get(p)
     }
 }
 
@@ -155,12 +148,13 @@ struct LogLine {
     text: String,
 }
 
-struct Board {
+pub struct Board {
     base: BoardView,
     known: Option<Box<Knowledge>>,
     npc_vision: Vision,
     _pc_vision: Vision,
     logs: Vec<LogLine>,
+    _effect: Effect,
 }
 
 impl Deref for Board {
@@ -180,7 +174,51 @@ impl Board {
             npc_vision: Vision::new(FOV_RADIUS_NPC),
             _pc_vision: Vision::new(FOV_RADIUS_PC_),
             logs: vec![],
+            _effect: Effect::default(),
         }
+    }
+
+    // Writes
+
+    fn add_effect(&mut self, effect: Effect) {
+        let mut existing = Effect::default();
+        std::mem::swap(&mut self._effect, &mut existing);
+        self._effect = existing.and(effect);
+        self._execute_effect_callbacks();
+    }
+
+    fn advance_effect(&mut self) -> bool {
+        if self._effect.frames.is_empty() {
+            assert!(self._effect.events.is_empty());
+            return false;
+        }
+        self._effect.frames.remove(0);
+        self._effect.events.iter_mut().for_each(|x| x.update_frame(|y| y - 1));
+        self._execute_effect_callbacks();
+        true
+    }
+
+    fn _execute_effect_callbacks(&mut self) {
+        while self._execute_one_effect_callback() {}
+    }
+
+    fn _execute_one_effect_callback(&mut self) -> bool {
+        if self._effect.events.is_empty() { return false; }
+        let event = &self._effect.events[0];
+        if !self._effect.frames.is_empty() && event.frame() > 0 { return false; }
+        match self._effect.events.remove(0) {
+            Event::Callback { callback, .. } => callback(self),
+            Event::Other { .. } => (),
+        }
+        true
+    }
+
+    fn fill_map(&mut self, t: &'static Tile) {
+        self._map.fill(t)
+    }
+
+    fn set_tile_at(&mut self, p: Point, t: &'static Tile) {
+        self._map.set(p, t)
     }
 
     // Logging
@@ -208,6 +246,10 @@ impl Board {
 
     // Knowledge
 
+    fn get_current_frame(&self) -> Option<&Frame> {
+        self._effect.frames.iter().next()
+    }
+
     fn set_focus(&mut self, eid: EID, focus: Option<EID>) {
         self.entities[eid].known.focus = focus;
     }
@@ -219,7 +261,7 @@ impl Board {
         let entity = &self.base.entities[eid];
         let (player, pos, dir) = (entity.player, entity.pos, entity.dir);
         let vision = if player { &mut self._pc_vision } else { &mut self.npc_vision };
-        vision.compute(&VisionArgs { player, pos, dir }, |p| self.base.map.get(p));
+        vision.compute(&VisionArgs { player, pos, dir }, |p| self.base.get_tile_at(p));
         known.update(&entity, &self.base, vision);
 
         std::mem::swap(&mut self.base.entities[eid].known, &mut known);
@@ -330,14 +372,14 @@ impl Board {
 
 // Map generation
 
-fn mapgen(map: &mut Matrix<&'static Tile>) {
+fn mapgen(board: &mut Board) {
     let ft = Tile::get('.');
     let wt = Tile::get('#');
     let gt = Tile::get('"');
 
-    map.fill(ft);
+    board.fill_map(ft);
     let d100 = || random::<u32>() % 100;
-    let size = map.size;
+    let size = board.get_size();
 
     let automata = || -> Matrix<bool> {
         let mut result = Matrix::new(size, false);
@@ -388,9 +430,9 @@ fn mapgen(map: &mut Matrix<&'static Tile>) {
         for x in 0..size.0 {
             let point = Point(x, y);
             if walls.get(point) {
-                map.set(point, wt);
+                board.set_tile_at(point, wt);
             } else if grass.get(point) {
-                map.set(point, gt);
+                board.set_tile_at(point, gt);
             }
         }
     }
@@ -847,6 +889,26 @@ fn plan(board: &Board, eid: EID, input: &mut Action) -> Action {
     }
 }
 
+//////////////////////////////////////////////////////////////////////////////
+
+// Apply an Action to our state
+
+type CB = Box<dyn Fn(&mut Board)>;
+
+fn apply_effect(mut effect: Effect, what: FT, callback: CB) -> Effect {
+    let frame = effect.events.iter().find_map(
+        |x| if x.what() == Some(what) { Some(x.frame()) } else { None });
+    if let Some(frame) = frame {
+        effect.add_event(Event::Callback { frame, callback });
+    }
+    effect
+}
+
+fn apply_summon(source: Point, target: Point, callback: CB) -> Effect {
+    let effect = effect::SummonEffect(source, target);
+    apply_effect(effect, FT::Summon, callback)
+}
+
 fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
     match action {
         Action::Idle => ActionResult::success(),
@@ -891,7 +953,7 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 Entity::Trainer(x) => x,
                 _ => return ActionResult::failure(),
             };
-            let tid = trainer.id();
+            let (tid, source) = (trainer.id(), trainer.pos);
             let name = match trainer.data.pokemon.get(index) {
                 Some(PokemonEdge::In(x)) if x.cur_hp > 0 => name(x),
                 _ => return ActionResult::failure(),
@@ -901,20 +963,25 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             }
 
             shout(&mut state.board, tid, &format!("Go! {}!", name));
-
-            let trainer = cast!(&mut state.board.entities[eid], Entity::Trainer);
-            let me = cast!(trainer.data.pokemon.remove(index), PokemonEdge::In);
-            let dir = target - trainer.pos;
-            let arg = SummonArgs { pos: target, dir, me, trainer: trainer.id() };
-            let pid = state.board.add_summoned_pokemon(arg);
-            let trainer = cast!(&mut state.board.entities[eid], Entity::Trainer);
-            trainer.data.pokemon.insert(index, PokemonEdge::Out(pid));
-            trainer.data.summons.push(pid);
-
+            let cb = move |board: &mut Board| {
+                let trainer = &mut board.entities[tid];
+                let me = cast!(trainer.data.pokemon.remove(index), PokemonEdge::In);
+                let dir = target - trainer.pos;
+                let arg = SummonArgs { pos: target, dir, me, trainer: trainer.id() };
+                let pid = board.add_summoned_pokemon(arg);
+                let trainer = &mut board.entities[tid];
+                trainer.data.pokemon.insert(index, PokemonEdge::Out(pid));
+                trainer.data.summons.push(pid);
+            };
+            state.board.add_effect(apply_summon(source, target, Box::new(cb)));
             ActionResult::success()
         }
     }
 }
+
+//////////////////////////////////////////////////////////////////////////////
+
+// Top-level game update
 
 fn get_direction(ch: char) -> Option<Point> {
     match ch {
@@ -1093,6 +1160,11 @@ fn update_focus(state: &mut State) {
 }
 
 fn update_state(state: &mut State) {
+    if state.board.advance_effect() {
+        state.board.update_known(state.player.eid());
+        return;
+    }
+
     let player_alive = |state: &State| {
         !state.board.entities[state.player].removed
     };
@@ -1101,7 +1173,7 @@ fn update_state(state: &mut State) {
         if !matches!(state.input, Action::WaitForInput) { return false; }
         let active = state.board.get_active_entity();
         if active != state.player.eid() { return false; }
-        player_alive(state)
+        player_alive(state) && state.board.get_current_frame().is_none()
     };
 
     while !state.inputs.is_empty() && needs_input(state) {
@@ -1116,7 +1188,7 @@ fn update_state(state: &mut State) {
 
     let mut update = false;
 
-    while player_alive(state) {
+    while player_alive(state) && state.board.get_current_frame().is_none() {
         let eid = state.board.get_active_entity();
         let entity = &state.board.entities[eid];
         if !turn_ready(entity) {
@@ -1329,8 +1401,8 @@ impl State {
         let pos = Point(size.0 / 2, size.1 / 2);
 
         loop {
-            mapgen(&mut board.map);
-            if !board.map.get(pos).blocked() { break; }
+            mapgen(&mut board);
+            if !board.get_tile_at(pos).blocked() { break; }
         }
 
         let name = "skishore";
@@ -1409,6 +1481,14 @@ impl State {
             }
         }
 
+        if let Some(frame) = self.board.get_current_frame() {
+            for effect::Particle { point, glyph } in frame {
+                if !known.can_see_now(*point) { continue; }
+                let Point(x, y) = *point - offset;
+                buffer.set(self.ui.map.root + Point(2 * x, y), *glyph);
+            }
+        }
+
         let set = |buffer: &mut Buffer, p: Point, glyph: Glyph| {
             let Point(x, y) = p - offset;
             if !(0 <= x && x < UI_MAP_SIZE_X) { return; }
@@ -1442,7 +1522,7 @@ impl State {
             let frame = target.frame >> 1;
             let count = UI_TARGET_FRAMES >> 1;
             let limit = target.path.len() as i32 - 1;
-            let ch = self.ray_character(target.source, target.target);
+            let ch = ray_character(target.source, target.target);
             for i in 0..limit {
                 if !((i + count - frame) % count < 2) { continue; }
                 let (point, okay) = target.path[i as usize];
@@ -1512,12 +1592,13 @@ impl State {
     }
 
     fn render_status(&self, trainer: &Trainer, slice: &mut Slice) {
-        if let Some(entity) = trainer.known.get_view_of(trainer.id().eid()) {
+        let known = &*trainer.known;
+        if let Some(entity) = known.get_view_of(trainer.id().eid()) {
             self.render_entity(Some(PLAYER_KEY), None, entity, slice);
         }
         for (i, key) in SUMMON_KEYS.iter().enumerate() {
             let eid = trainer.data.summons.get(i).map(|x| x.eid());
-            if let Some(entity) = eid.and_then(|x| trainer.known.get_view_of(x)) {
+            if let Some(entity) = eid.and_then(|x| known.get_view_of(x)) {
                 self.render_entity(Some(*key), None, entity, slice);
             } else {
                 self.render_empty_option(*key, 0, slice);
@@ -1688,14 +1769,6 @@ impl State {
         for _ in 0..count { slice.write_chr(glyph); }
         for _ in count..width { slice.write_chr(' '); }
         slice.write_chr(']');
-    }
-
-    fn ray_character(&self, source: Point, target: Point) -> char {
-        let Point(x, y) = source - target;
-        let (ax, ay) = (x.abs(), y.abs());
-        if ax > 2 * ay { return '-'; }
-        if ay > 2 * ax { return '|'; }
-        if (x > 0) == (y > 0) { '\\' } else { '/' }
     }
 
     fn hp_color(&self, hp: f64) -> Color {
