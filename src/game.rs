@@ -7,7 +7,7 @@ use rand::random;
 
 use crate::{cast, static_assert_size};
 use crate::base::{Buffer, Color, Glyph, Slice};
-use crate::base::{HashMap, LOS, Matrix, Point, Rect, dirs};
+use crate::base::{HashMap, HashSet, LOS, Matrix, Point, Rect, dirs};
 use crate::base::{clamp, sample, weighted};
 use crate::effect::{Effect, Event, Frame, FT, ray_character, self};
 use crate::entity::{EID, PID, TID, EntityMap, EntityMapKey};
@@ -455,6 +455,14 @@ fn init_summon_target(player: &Trainer, data: TargetData) -> Box<Target> {
     let (known, pos, dir) = (&*player.known, player.pos, player.dir);
     let mut target = init_target(data, pos, pos);
 
+    if let Some(x) = defend_at_pos(pos, player) {
+        let line = LOS(pos, x);
+        for p in line.iter().skip(1).rev() {
+            update_target(known, &mut target, *p);
+            if target.error.is_empty() { return target; }
+        }
+    }
+
     let mut okay = |p: Point| {
         if !check_follower_square(known, player, p, false) { return false; }
         update_target(known, &mut target, p);
@@ -829,7 +837,7 @@ fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
     action
 }
 
-fn check_follower_square(known: &Knowledge, leader: &Trainer,
+fn check_follower_square(known: &Knowledge, trainer: &Trainer,
                          target: Point, ignore_occupant: bool) -> bool {
     let free = match known.get_status(target).unwrap_or(Status::Blocked) {
         Status::Free => true,
@@ -838,13 +846,80 @@ fn check_follower_square(known: &Knowledge, leader: &Trainer,
     };
     if !free { return false }
 
-    let source = leader.pos;
+    let source = trainer.pos;
     let length = (source - target).len_nethack();
     if length > 2 { return false; }
     if length < 2 { return true; }
 
     let vision = |p: Point| { known.get_cell(p).map(|x| x.visibility).unwrap_or(-1) };
     vision(source) == vision(target)
+}
+
+fn defend_at_pos(source: Point, trainer: &Trainer) -> Option<Point> {
+    let rivals = rivals(trainer);
+    if rivals.is_empty() { return None; }
+
+    // TODO(shaunak): Combine our knowledge and our leader's here.
+    let known = &*trainer.known;
+    let defended = |p: Point| {
+        if p == source || p == trainer.pos { return false; }
+        let cell = known.get_cell(p);
+        let other = cell.and_then(|x| known.get_entity(x));
+        if other.map(|x| x.friend).unwrap_or(false) { return true; }
+        cell.map(|x| x.tile.blocked()).unwrap_or(true)
+    };
+
+    let mut scores = HashMap::default();
+    for (rival, _) in &rivals {
+        let mut marked = HashSet::default();
+        let los = LOS(rival.pos, trainer.pos);
+
+        let diff = rival.pos - trainer.pos;
+        let shift_a = if diff.0.abs() > diff.1.abs() {
+            Point(0, if diff.1 == 0 { 1 } else { diff.1.signum() })
+        } else {
+            Point(if diff.0 == 0 { 1 } else { diff.0.signum() }, 0)
+        };
+        let shift_b = Point::default() - shift_a;
+        let shifts: [(Point, f64); 3] =
+            [(Point::default(), 64.), (shift_a, 8.), (shift_b, 1.)];
+
+        for (shift, score) in &shifts {
+            if los.iter().any(|x| defended(*x + *shift)) { continue; }
+            for point in &los {
+                let delta = *point + *shift - trainer.pos;
+                if delta.0.abs() > 2 || delta.1.abs() > 2 { continue; }
+                if !marked.insert(delta) { continue; }
+                *scores.entry(delta).or_insert(0.) += *score;
+            }
+        }
+    }
+
+    let (mut best_score, mut best_point) = (f64::NEG_INFINITY, None);
+    for x in -2..=2 {
+        for y in -2..=2 {
+            if x == 0 && y == 0 { continue; }
+            let (d, p) = (Point(x, y), Point(x, y) + trainer.pos);
+            if !check_follower_square(known, trainer, p, p == source) { continue; }
+
+            let mut score = scores.get(&d).cloned().unwrap_or(f64::NEG_INFINITY);
+            if score == f64::NEG_INFINITY { continue; }
+            score += 0.0625 * d.len_l2_squared() as f64;
+            score -= 0.015625 * (p - source).len_l2_squared() as f64;
+            if score > best_score { (best_score, best_point) = (score, Some(p)); }
+        }
+    }
+    best_point
+}
+
+fn defend_leader(pokemon: &Pokemon, trainer: &Trainer) -> Option<Action> {
+    // TODO(shaunak): Combine our knowledge and our leader's here.
+    let known = &*trainer.known;
+    let check = |p: Point| known.get_status(p).unwrap_or(Status::Occupied);
+    let goal = defend_at_pos(pokemon.pos, trainer)?;
+    let path = AStar(pokemon.pos, goal, ASTAR_LIMIT_ATTACK, check)?;
+    if path.is_empty() { return Some(Action::Idle); }
+    Some(Action::Move(MoveData { dir: (path[0] - pokemon.pos), turns: 1. }))
 }
 
 fn follow_leader(pokemon: &Pokemon, trainer: &Trainer) -> Action {
@@ -874,6 +949,11 @@ fn plan_pokemon(board: &Board, pokemon: &Pokemon) -> Action {
         Some(tid) => &board.entities[tid],
         None => return plan_wild_pokemon(pokemon),
     };
+    //let ready = move_ready(pokemon);
+    //if !ready && let Some(x) = defend_leader(pokemon, trainer) { return x;  }
+    // (use attacks here!)
+    //if ready && let Some(x) = defend_leader(pokemon, trainer) { return x;  }
+    if let Some(x) = defend_leader(pokemon, trainer) { return x; }
     follow_leader(pokemon, trainer)
 }
 
@@ -1198,7 +1278,12 @@ fn update_state(state: &mut State) {
             break;
         }
 
+        // Update the trainer's view, too, since owned Pokemon use it to plan.
+        // TODO(shaunak): Combine both views so we don't need to do that.
+        let tid = entity.trainer();
         state.board.update_known(eid);
+        if let Some(x) = tid { state.board.update_known(x.eid()); }
+
         let player = eid == state.player.eid();
         let action = plan(&state.board, eid, &mut state.input);
         let result = act(state, eid, action);

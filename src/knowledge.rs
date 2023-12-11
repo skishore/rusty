@@ -275,6 +275,7 @@ impl Knowledge {
                 });
 
                 let species = other.species();
+                let trainer = other.trainer();
                 let entry = self.entity_mut(index);
 
                 entry.age = 0;
@@ -282,8 +283,8 @@ impl Knowledge {
                 entry.dir = other.dir;
                 entry.moved = false;
                 entry.glyph = other.glyph;
-                entry.rival = species.is_some() && species != my_species;
-                entry.friend = other.trainer() == my_trainer;
+                entry.rival = !trainer.is_some() && species != my_species;
+                entry.friend = trainer == my_trainer;
                 entry.player = other.player;
                 entry.view = get_view(other, view);
 
