@@ -1376,22 +1376,47 @@ impl Default for UI {
 }
 
 impl UI {
-    fn render_bar(&self, buffer: &mut Buffer, width: i32, pos: Point, text: &str) {
-        let shift = 2;
-        let color: Color = UI_COLOR.into();
-        let dashes = Glyph::chfg('-', color);
-        let prefix_width = shift + text.chars().count() as i32;
-        assert!(prefix_width <= width);
-        for x in 0..shift {
-            buffer.set(pos + Point(x, 0), dashes);
+    // Public entry points
+
+    fn render_map(&self, entity: &Entity, frame: Option<&Frame>,
+                  offset: Point, range: Option<i32>, slice: &mut Slice) {
+        let (known, pos) = (&*entity.known, entity.pos);
+        let in_range = |p: Point| range.map(|x| (p - pos).in_l2_range(x)).unwrap_or(true);
+        let unseen = Glyph::wide(' ');
+
+        for y in 0..UI_MAP_SIZE_Y {
+            for x in 0..UI_MAP_SIZE_X {
+                let point = Point(x, y) + offset;
+                let glyph = match known.get_cell(point) {
+                    Some(x) => if x.age > 0 {
+                        x.tile.glyph.with_fg(Color::gray())
+                    } else {
+                        let glyph = known.get_entity(x).map(|y| y.glyph).unwrap_or(x.tile.glyph);
+                        if in_range(point) { glyph } else { glyph.with_fg(Color::gray()) }
+                    }
+                    None => unseen
+                };
+                slice.set(Point(2 * x, y), glyph);
+            }
         }
-        for (i, c) in text.chars().enumerate() {
-            buffer.set(pos + Point(i as i32 + shift, 0), Glyph::chfg(c, color));
+
+        for eid in entity.friends() {
+            if let Some(friend) = known.get_view_of(eid) && friend.age > 0 {
+                let Point(x, y) = friend.pos - offset;
+                slice.set(Point(2 * x, y), Glyph::char('?'));
+            }
         }
-        for x in prefix_width..width {
-            buffer.set(pos + Point(x, 0), dashes);
+
+        if let Some(frame) = frame {
+            for effect::Particle { point, glyph } in frame {
+                if !known.can_see_now(*point) { continue; }
+                let Point(x, y) = *point - offset;
+                slice.set(Point(2 * x, y), *glyph);
+            }
         }
     }
+
+    // Private implementation details
 
     fn render_box(&self, buffer: &mut Buffer, rect: &Rect) {
         let Point(w, h) = rect.size;
@@ -1432,17 +1457,36 @@ impl UI {
         let uw = self.bounds.0;
         let uh = self.bounds.1;
 
-        self.render_bar(buffer, ml, Point(0, 0), "Party");
-        self.render_bar(buffer, ml, Point(ml + mw, 0), "Target");
-        self.render_bar(buffer, ml, Point(ml + mw, rt), "Wild Pokemon");
-        self.render_bar(buffer, ml, Point(0, mh - 1), "Log");
-        self.render_bar(buffer, ml, Point(ml + mw, mh - 1), "");
-        self.render_bar(buffer, uw, Point(0, uh - 1), "");
+        self.render_title(buffer, ml, Point(0, 0), "Party");
+        self.render_title(buffer, ml, Point(ml + mw, 0), "Target");
+        self.render_title(buffer, ml, Point(ml + mw, rt), "Wild Pokemon");
+        self.render_title(buffer, ml, Point(0, mh - 1), "Log");
+        self.render_title(buffer, ml, Point(ml + mw, mh - 1), "");
+        self.render_title(buffer, uw, Point(0, uh - 1), "");
 
         self.render_box(buffer, &self.map);
     }
 
-    fn render_key(key: char) -> String { format!("[{}] ", key) }
+    fn render_key(key: char) -> String {
+        format!("[{}] ", key)
+    }
+
+    fn render_title(&self, buffer: &mut Buffer, width: i32, pos: Point, text: &str) {
+        let shift = 2;
+        let color: Color = UI_COLOR.into();
+        let dashes = Glyph::chfg('-', color);
+        let prefix_width = shift + text.chars().count() as i32;
+        assert!(prefix_width <= width);
+        for x in 0..shift {
+            buffer.set(pos + Point(x, 0), dashes);
+        }
+        for (i, c) in text.chars().enumerate() {
+            buffer.set(pos + Point(i as i32 + shift, 0), Glyph::chfg(c, color));
+        }
+        for x in prefix_width..width {
+            buffer.set(pos + Point(x, 0), dashes);
+        }
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -1547,76 +1591,40 @@ impl State {
         self.ui.render_frame(buffer);
 
         let player = &self.board.entities[self.player];
-        let (known, pos) = (&*player.known, player.pos);
-        let offset = pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
-        let unseen = Glyph::wide(' ');
+        let offset = player.pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
 
+        let frame = self.board.get_current_frame();
+        let slice = &mut Slice::new(buffer, self.ui.map);
         let range = self.target.as_ref().and_then(|x| match &x.data {
             TargetData::Summon { range, .. } => Some(*range),
             _ => None,
         });
-        let in_range = |p: Point| range.map(|x| (p - pos).in_l2_range(x)).unwrap_or(true);
 
-        for y in 0..UI_MAP_SIZE_Y {
-            for x in 0..UI_MAP_SIZE_X {
-                let point = Point(x, y) + offset;
-                let glyph = match known.get_cell(point) {
-                    Some(x) => if x.age > 0 {
-                        x.tile.glyph.with_fg(Color::gray())
-                    } else {
-                        let glyph = known.get_entity(x).map(|y| y.glyph).unwrap_or(x.tile.glyph);
-                        if in_range(point) { glyph } else { glyph.with_fg(Color::gray()) }
-                    }
-                    None => unseen
-                };
-                buffer.set(self.ui.map.root + Point(2 * x, y), glyph);
-            }
-        }
+        self.ui.render_map(player, frame, offset, range, slice);
 
-        for eid in player.friends() {
-            if let Some(friend) = known.get_view_of(eid) && friend.age > 0 {
-                let Point(x, y) = friend.pos - offset;
-                buffer.set(self.ui.map.root + Point(2 * x, y), Glyph::char('?'));
-            }
-        }
-
-        if let Some(frame) = self.board.get_current_frame() {
-            for effect::Particle { point, glyph } in frame {
-                if !known.can_see_now(*point) { continue; }
-                let Point(x, y) = *point - offset;
-                buffer.set(self.ui.map.root + Point(2 * x, y), *glyph);
-            }
-        }
-
-        let set = |buffer: &mut Buffer, p: Point, glyph: Glyph| {
-            let Point(x, y) = p - offset;
-            if !(0 <= x && x < UI_MAP_SIZE_X) { return; }
-            if !(0 <= y && y < UI_MAP_SIZE_Y) { return; }
-            let point = self.ui.map.root + Point(2 * x, y);
-            buffer.set(point, glyph);
+        let set = |slice: &mut Slice, p: Point, glyph: Glyph| {
+            let point = Point(2 * (p.0 - offset.0), p.1 - offset.1);
+            slice.set(point, glyph);
         };
 
-        let recolor = |buffer: &mut Buffer, p: Point,
-                       fg: Option<Color>, bg: Option<Color>| {
-            let Point(x, y) = p - offset;
-            if !(0 <= x && x < UI_MAP_SIZE_X) { return; }
-            if !(0 <= y && y < UI_MAP_SIZE_Y) { return; }
-            let point = self.ui.map.root + Point(2 * x, y);
+        let recolor = |slice: &mut Slice, p: Point, fg: Option<Color>, bg: Option<Color>| {
+            let point = Point(2 * (p.0 - offset.0), p.1 - offset.1);
+            if !slice.contains(point) { return; }
 
-            let mut glyph = buffer.get(point);
+            let mut glyph = slice.get(point);
             if let Some(fg) = fg {
                 glyph = glyph.with_fg(fg);
             }
             if glyph.bg() == Color::default() && let Some(bg) = bg {
                 glyph = glyph.with_bg(bg);
             }
-            buffer.set(point, glyph);
+            slice.set(point, glyph);
         };
 
         if let Some(target) = &self.target {
             let color = if target.error.is_empty() { 0x440 } else { 0x400 };
-            recolor(buffer, target.source, Some(Color::black()), Some(0x222.into()));
-            recolor(buffer, target.target, Some(Color::black()), Some(color.into()));
+            recolor(slice, target.source, Some(Color::black()), Some(0x222.into()));
+            recolor(slice, target.target, Some(Color::black()), Some(color.into()));
 
             let frame = target.frame >> 1;
             let count = UI_TARGET_FRAMES >> 1;
@@ -1626,19 +1634,20 @@ impl State {
                 if !((i + count - frame) % count < 2) { continue; }
                 let (point, okay) = target.path[i as usize];
                 let color = if okay { 0x440 } else { 0x400 };
-                set(buffer, point, Glyph::wdfg(ch, color));
+                set(slice, point, Glyph::wdfg(ch, color));
             }
         }
 
         if self.focus.active {
-            let aware = self.focus.vision.can_see_now(pos);
+            let aware = self.focus.vision.can_see_now(player.pos);
             let color = if aware { 0x100 } else { 0x000 };
+            let slice = &mut Slice::new(buffer, self.ui.map);
 
             for (i, point) in self.focus.vision.points_seen.iter().enumerate() {
                 if i == 0 {
-                    recolor(buffer, *point, Some(Color::black()), Some(0x222.into()));
+                    recolor(slice, *point, Some(Color::black()), Some(0x222.into()));
                 } else {
-                    recolor(buffer, *point, None, Some(color.into()));
+                    recolor(slice, *point, None, Some(color.into()));
                 }
             }
         }
