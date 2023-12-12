@@ -49,6 +49,10 @@ impl Vision {
         }
     }
 
+    pub fn can_see_now(&self, p: Point) -> bool {
+        self.get_visibility_at(p) >= 0
+    }
+
     pub fn get_visibility_at(&self, p: Point) -> i32 {
         self.visibility.get(p + self.offset)
     }
@@ -239,56 +243,24 @@ impl Knowledge {
 
     // Writes
 
-    pub fn update(&mut self, entity: &Entity, view: &BoardView, vision: &Vision) {
-        let my_species = entity.species();
-        let my_trainer = entity.trainer();
-        self.forget(entity.player);
+    pub fn update(&mut self, me: &Entity, view: &BoardView, vision: &Vision) {
+        self.forget(me.player);
 
+        // Entities have approximate knowledge about friends, even if unseen.
+        for eid in me.friends() {
+            if let Some(friend) = view.get_entity(eid) && !vision.can_see_now(friend.pos) {
+                self.update_entity(me, view, friend, false);
+            }
+        }
+
+        // Entities have exact knowledge about anything they can see.
         for point in &vision.points_seen {
             let visibility = vision.get_visibility_at(*point);
             assert!(visibility >= 0);
 
             let index = (|| {
                 let other = view.get_entity(view.get_entity_at(*point)?)?;
-                let index = *self.entity_by_id.entry(other.id()).and_modify(|x| {
-                    let existing = &mut self.entities[x.0 as usize];
-                    if !existing.moved && existing.pos != *point {
-                        self.map.entry(existing.pos).and_modify(|y| {
-                            assert!(y.index == Some(*x));
-                            y.index = None;
-                        });
-                    };
-                }).or_insert_with(|| {
-                    self.entities.push(EntityKnowledge {
-                        eid: other.id(),
-                        age: Default::default(),
-                        pos: Default::default(),
-                        dir: Default::default(),
-                        moved: Default::default(),
-                        glyph: Default::default(),
-                        rival: Default::default(),
-                        friend: Default::default(),
-                        player: Default::default(),
-                        view: Default::default(),
-                    });
-                    EntityIndex(self.entities.len() as i32 - 1)
-                });
-
-                let species = other.species();
-                let trainer = other.trainer();
-                let entry = self.entity_mut(index);
-
-                entry.age = 0;
-                entry.pos = *point;
-                entry.dir = other.dir;
-                entry.moved = false;
-                entry.glyph = other.glyph;
-                entry.rival = !trainer.is_some() && species != my_species;
-                entry.friend = trainer == my_trainer;
-                entry.player = other.player;
-                entry.view = get_view(other, view);
-
-                Some(index)
+                Some(self.update_entity(me, view, other, true))
             })();
 
             let tile = view.get_tile_at(*point);
@@ -301,6 +273,49 @@ impl Knowledge {
     }
 
     // Private helpers
+
+    fn update_entity(&mut self, me: &Entity, view: &BoardView,
+                     other: &Entity, seen: bool) -> EntityIndex {
+        let index = *self.entity_by_id.entry(other.id()).and_modify(|x| {
+            let existing = &mut self.entities[x.0 as usize];
+            if !existing.moved && !(seen && existing.pos == other.pos) {
+                self.map.entry(existing.pos).and_modify(|y| {
+                    assert!(y.index == Some(*x));
+                    y.index = None;
+                });
+            };
+        }).or_insert_with(|| {
+            self.entities.push(EntityKnowledge {
+                eid: other.id(),
+                age: Default::default(),
+                pos: Default::default(),
+                dir: Default::default(),
+                moved: Default::default(),
+                glyph: Default::default(),
+                rival: Default::default(),
+                friend: Default::default(),
+                player: Default::default(),
+                view: Default::default(),
+            });
+            EntityIndex(self.entities.len() as i32 - 1)
+        });
+
+        let species = other.species();
+        let trainer = other.trainer();
+        let entry = self.entity_mut(index);
+
+        entry.age = if seen { 0 } else { 1 };
+        entry.pos = other.pos;
+        entry.dir = other.dir;
+        entry.moved = !seen;
+        entry.glyph = other.glyph;
+        entry.rival = !trainer.is_some() && species != me.species();
+        entry.friend = trainer == me.trainer();
+        entry.player = other.player;
+        entry.view = get_view(other, view);
+
+        index
+    }
 
     fn entity_raw(&self, index: EntityIndex) -> &EntityKnowledge {
         &self.entities[index.0 as usize]

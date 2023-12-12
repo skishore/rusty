@@ -1573,6 +1573,13 @@ impl State {
             }
         }
 
+        for eid in player.friends() {
+            if let Some(friend) = known.get_view_of(eid) && friend.age > 0 {
+                let Point(x, y) = friend.pos - offset;
+                buffer.set(self.ui.map.root + Point(2 * x, y), Glyph::char('?'));
+            }
+        }
+
         if let Some(frame) = self.board.get_current_frame() {
             for effect::Particle { point, glyph } in frame {
                 if !known.can_see_now(*point) { continue; }
@@ -1624,7 +1631,7 @@ impl State {
         }
 
         if self.focus.active {
-            let aware = self.focus.vision.get_visibility_at(player.pos) >= 0;
+            let aware = self.focus.vision.can_see_now(pos);
             let color = if aware { 0x100 } else { 0x000 };
 
             for (i, point) in self.focus.vision.points_seen.iter().enumerate() {
@@ -1657,7 +1664,7 @@ impl State {
         let mut rivals = rivals(trainer);
         rivals.truncate(max(slice.size().1, 0) as usize / 2);
 
-        for (entity, pokemon) in rivals {
+        for (rival, pokemon) in rivals {
             let PokemonSpeciesData { glyph, name, .. } = pokemon.species;
             let (hp, hp_color) = (pokemon.hp, self.hp_color(pokemon.hp));
             let hp_text = format!("{}%", max((100.0 * hp).floor() as i32, 1));
@@ -1669,8 +1676,8 @@ impl State {
             slice.spaces(ss).set_fg(Some(hp_color)).write_str(&hp_text).newline();
 
             let targeted = match &self.target {
-                Some(x) => x.target == entity.pos,
-                None => trainer.known.focus == Some(entity.eid),
+                Some(x) => x.target == rival.pos,
+                None => trainer.known.focus == Some(rival.eid),
             };
             if targeted {
                 let start = slice.get_cursor() - Point(0, 1);
@@ -1685,13 +1692,13 @@ impl State {
 
     fn render_status(&self, trainer: &Trainer, slice: &mut Slice) {
         let known = &*trainer.known;
-        if let Some(entity) = known.get_view_of(trainer.id().eid()) {
-            self.render_entity(Some(PLAYER_KEY), None, entity, slice);
+        if let Some(view) = known.get_view_of(trainer.id().eid()) {
+            self.render_entity(Some(PLAYER_KEY), None, view, slice);
         }
         for (i, key) in SUMMON_KEYS.iter().enumerate() {
             let eid = trainer.data.summons.get(i).map(|x| x.eid());
-            if let Some(entity) = eid.and_then(|x| known.get_view_of(x)) {
-                self.render_entity(Some(*key), None, entity, slice);
+            if let Some(view) = eid.and_then(|x| known.get_view_of(x)) {
+                self.render_entity(Some(*key), None, view, slice);
             } else {
                 self.render_empty_option(*key, 0, slice);
             }
@@ -1709,39 +1716,38 @@ impl State {
             return;
         }
 
-        let (cell, entity, header, seen) = match &self.target {
+        let (cell, view, header, seen) = match &self.target {
             Some(x) => {
                 let cell = known.get_cell(x.target);
                 let seen = cell.map(|x| x.age == 0).unwrap_or(false);
-                let entity = cell.and_then(|x| known.get_entity(x));
+                let view = cell.and_then(|x| known.get_entity(x));
                 let header = match &x.data {
                     TargetData::FarLook => "Examining...".into(),
                     TargetData::Summon { index, .. } => {
                         let name = match &trainer.data.pokemon[*index] {
                             PokemonEdge::In(y) => name(y),
-                            PokemonEdge::Out(y) =>
-                                name(&self.board.entities[*y].data.me),
+                            PokemonEdge::Out(_) => "?",
                         };
                         format!("Sending out {}...", name)
                     }
                 };
-                (cell, entity, header, seen)
+                (cell, view, header, seen)
             }
             None => {
-                let entity = known.focus.and_then(|x| known.get_view_of(x));
-                let seen = entity.map(|x| x.age == 0).unwrap_or(false);
-                let cell = entity.and_then(|x| known.get_cell(x.pos));
+                let view = known.focus.and_then(|x| known.get_view_of(x));
+                let seen = view.map(|x| x.age == 0).unwrap_or(false);
+                let cell = view.and_then(|x| known.get_cell(x.pos));
                 let header = if seen {
                     "Last target:"
                 } else {
                     "Last target: (remembered)"
                 }.into();
-                (cell, entity, header, seen)
+                (cell, view, header, seen)
             },
         };
 
         let fg = if self.target.is_some() || seen { None } else { Some(0x111.into()) };
-        let text = if entity.is_some() {
+        let text = if view.is_some() {
             if seen { "Standing on: " } else { "Stood on: " }
         } else {
             if seen { "You see: " } else { "You saw: " }
@@ -1750,8 +1756,8 @@ impl State {
         slice.newline();
         slice.set_fg(fg).write_str(&header).newline();
 
-        if let Some(x) = entity {
-            self.render_entity(None, fg, x, slice);
+        if let Some(view) = view {
+            self.render_entity(None, fg, view, slice);
         } else {
             slice.newline();
         }

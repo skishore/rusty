@@ -296,6 +296,13 @@ impl DerefMut for Trainer {
 impl Entity {
     pub fn id(&self) -> EID { self.eid }
 
+    pub fn friends(&self) -> Vec<EID> {
+        match self {
+            Entity::Trainer(x) => x.data.summons.iter().map(|x| x.eid()).collect(),
+            Entity::Pokemon(x) => x.data.me.trainer.iter().map(|x| x.eid()).collect(),
+        }
+    }
+
     pub fn species(&self) -> Option<&'static PokemonSpeciesData> {
         match self {
             Entity::Pokemon(x) => Some(x.data.me.species),
