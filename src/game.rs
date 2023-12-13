@@ -739,6 +739,7 @@ fn explore_near(entity: &Entity, source: Point, age: i32, turns: f64) -> Action 
             if source == pos { return *sample(&targets); }
             *targets.select_nth_unstable_by_key(0, |x| (*x - pos).len_l2_squared()).1
         })();
+        if let Entity::Pokemon(x) = entity { x.data.target.set(vec![target]); }
         let path = AStar(pos, target, ASTAR_LIMIT_WANDER, check).unwrap_or(vec![]);
         if path.is_empty() { return Some(*sample(&dirs)); }
         Some(path[0] - pos)
@@ -792,6 +793,18 @@ fn flight(entity: &Entity, sources: &Vec<Point>) -> Option<Action> {
 
     DijkstraMap(DijkstraMode::Update, check, 1, &mut map);
 
+    let mut best_score = 9999;
+    let mut best_point = vec![];
+    for (point, value) in &map {
+        if *value < best_score {
+            best_score = *value;
+            best_point = vec![*point];
+        } else if *value == best_score {
+            best_point.push(*point);
+        }
+    }
+    assert!(best_score % 10 == 0);
+
     let lookup = |x: &Point| map.get(x).map(|x| *x).unwrap_or(-9999);
     let mut best_steps = vec![Point::default()];
     let mut best_score = lookup(&pos);
@@ -806,11 +819,16 @@ fn flight(entity: &Entity, sources: &Vec<Point>) -> Option<Action> {
         best_score = score;
     }
 
+    if let Entity::Pokemon(x) = entity { x.data.flight.set(map); }
+    if let Entity::Pokemon(x) = entity { x.data.target.set(best_point); }
+
     if best_steps[0] == Point::default() { return None; }
     Some(Action::Move(MoveData { dir: *sample(&best_steps), turns: 1.5 }))
 }
 
 fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
+    pokemon.data.flight.take();
+    pokemon.data.target.take();
     let mut ai = pokemon.data.ai.take().unwrap_or(Box::default());
     let prey = pokemon.data.me.species.name == "Pidgey";
 
@@ -872,6 +890,7 @@ fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
             explore_near(pokemon, x.target, x.age, 1.)
         }
         AIState::Flight(x) => flight(pokemon, &x.target).unwrap_or_else(||{
+            pokemon.data.flight.take();
             let (target, time) = (x.target[0], ASSESS_TIME);
             let mut x = Assess { switch: min(x.age + 1, x.switch), target, time };
             let result = assess(pokemon, &mut x);
@@ -1503,6 +1522,7 @@ fn update_state(state: &mut State) {
 
     if update {
         state.board.update_known(state.player.eid());
+        state.board.update_known(state.board.entity_order[2]);
     }
     update_focus(state);
 }
@@ -1516,8 +1536,8 @@ const UI_ROW_SPACE: i32 = 1;
 const UI_KEY_SPACE: i32 = 4;
 
 const UI_LOG_SIZE: i32 = 4;
-const UI_MAP_SIZE_X: i32 = 43;
-const UI_MAP_SIZE_Y: i32 = 43;
+const UI_MAP_SIZE_X: i32 = WORLD_SIZE;
+const UI_MAP_SIZE_Y: i32 = WORLD_SIZE;
 const UI_CHOICE_SIZE: i32 = 40;
 const UI_STATUS_SIZE: i32 = 30;
 const UI_COLOR: i32 = 0x430;
@@ -2070,6 +2090,50 @@ impl State {
             TargetData::Summon { range, .. } => Some(*range),
             _ => None,
         });
+
+        let entity = &self.board.entities[self.board.entity_order[2]];
+        self.ui.render_map(entity, frame, Point::default(), None, slice);
+        let debug = match entity {
+            Entity::Pokemon(x) => {
+                let flight = x.data.flight.take();
+                for (point, value) in &flight {
+                    let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
+                    slice.set(Point(2 * point.0, point.1), Glyph::wdfg(ch, Color::gray()));
+                }
+                x.data.flight.set(flight);
+
+                let target = x.data.target.take();
+                for t in &target {
+                    let point = Point(2 * t.0, t.1);
+                    let glyph = slice.get(point).with_fg(Color::black()).with_bg(0x400);
+                    slice.set(point, glyph);
+                }
+                x.data.target.set(target);
+
+                let ai = x.data.ai.take().unwrap_or(Box::default());
+                let result = format!("{:?}", ai);
+                x.data.ai.set(Some(ai));
+                result
+            }
+            Entity::Trainer(_) => "<none>".into(),
+        };
+        for eid in &self.board.entity_order {
+            let other = &self.board.entities[*eid];
+            let point = Point(2 * other.pos.0, other.pos.1);
+            slice.set(point, other.glyph);
+        }
+        for other in &entity.known.entities {
+            let color = if other.age == 0 { 0x040 } else {
+                if other.moved { 0x400 } else { 0x440 }
+            };
+            let glyph = other.glyph.with_fg(Color::black()).with_bg(color);
+            let point = Point(2 * other.pos.0, other.pos.1);
+            slice.set(point, glyph);
+        };
+        let slice = &mut Slice::new(buffer, self.ui.log);
+        slice.write_str(&debug);
+        if 1 == 1 { return; }
+
         self.ui.render_map(player, frame, offset, range, slice);
 
         let set = |slice: &mut Slice, p: Point, glyph: Glyph| {
