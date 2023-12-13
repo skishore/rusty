@@ -131,6 +131,8 @@ pub struct PokemonData {
     pub ai: Cell<Option<Box<AIState>>>,
     pub me: Box<PokemonIndividualData>,
     pub commands: Cell<Vec<Command>>,
+    pub flight: Cell<HashMap<Point, i32>>,
+    pub target: Cell<Vec<Point>>,
 }
 
 pub struct TrainerData {
@@ -192,6 +194,8 @@ fn summons(eid: EID, args: SummonArgs) -> Entity {
         ai: Cell::default(),
         me: args.me,
         commands: Cell::default(),
+        flight: Cell::default(),
+        target: Cell::default(),
     };
     let entity = EntityData {
         eid,
