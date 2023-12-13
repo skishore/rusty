@@ -37,6 +37,7 @@ const FOV_RADIUS_NPC: i32 = 12;
 const FOV_RADIUS_PC_: i32 = 21;
 
 const SUMMON_RANGE: i32 = 12;
+const WANDER_STEPS: i32 = 16;
 const WANDER_TURNS: f64 = 3.;
 const WORLD_SIZE: i32 = 100;
 
@@ -627,32 +628,38 @@ fn rivals<'a>(trainer: &'a Trainer) -> Vec<(&'a EntityKnowledge, &'a PokemonView
 // AI state definitions:
 
 #[derive(Debug)]
+pub struct Pause {
+    time: i32,
+}
+
+#[derive(Debug)]
 pub struct Fight {
-    pub age: i32,
-    pub target: Point,
+    age: i32,
+    target: Point,
 }
 
 #[derive(Debug)]
 pub struct Flight {
-    pub age: i32,
-    pub switch: i32,
-    pub target: Point,
+    age: i32,
+    switch: i32,
+    target: Point,
 }
 
 #[derive(Debug)]
 pub struct Wander {
-    pub time: i32,
+    time: i32,
 }
 
 #[derive(Debug)]
 pub struct Assess {
-    pub switch: i32,
-    pub target: Point,
-    pub time: i32,
+    switch: i32,
+    target: Point,
+    time: i32,
 }
 
 #[derive(Debug)]
 pub enum AIState {
+    Pause(Pause),
     Fight(Fight),
     Flight(Flight),
     Wander(Wander),
@@ -800,20 +807,28 @@ fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
             *ai = AIState::Fight(Fight { age, target });
         }
     }
+
     if let AIState::Fight(x) = ai.as_ref() && x.age >= MAX_FOLLOW_TIME {
         let (switch, target) = (MIN_FLIGHT_TIME, x.target);
         *ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME })
     }
     if let AIState::Wander(x) = ai.as_ref() && x.time <= 0 {
-        let (switch, target) = (MIN_FLIGHT_TIME, pokemon.pos + pokemon.dir);
-        *ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME })
+        let limit = (WANDER_TURNS * WANDER_STEPS as f64).round() as i32;
+        let time = random::<i32>().rem_euclid(limit);
+        *ai = AIState::Pause(Pause { time });
     }
-    if let AIState::Assess(x) = ai.as_ref() && x.time <= 0 {
-        *ai = AIState::Wander(Wander { time: random::<i32>().rem_euclid(16) });
+    if matches!(&*ai, AIState::Pause(x) if x.time <= 0) ||
+       matches!(&*ai, AIState::Assess(x) if x.time <= 0) {
+        let time = random::<i32>().rem_euclid(WANDER_STEPS);
+        *ai = AIState::Wander(Wander { time  });
     }
 
     let mut replacement = None;
     let action = match ai.as_mut() {
+        AIState::Pause(x) => {
+            x.time -= 1;
+            Action::Idle
+        }
         AIState::Fight(x) => if x.age == 0 {
             Action::Look(x.target - pokemon.pos)
         } else {
@@ -1000,13 +1015,15 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             if dir == Point::default() {
                 return ActionResult::success_turns(turns);
             }
+            // Look, first then move. We change direction even if the square
+            // is blocked and we cannot later move, so we see why next turn.
+            state.board.entities[eid].dir = dir;
             let entity = &state.board.entities[eid];
-            let player = entity.player;
-            let target = entity.pos + dir;
-            let source = entity.pos;
+            let (source, target) = (entity.pos, entity.pos + dir);
             match state.board.get_status(target) {
                 Status::Blocked => ActionResult::failure(),
                 Status::Occupied => {
+                    let player = entity.player;
                     let other = state.board.get_entity_at(target);
                     let other = other.map(|x| &state.board.entities[x]);
                     if let Some(Entity::Pokemon(x)) = other &&
@@ -1016,12 +1033,10 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                                 "You swap places with {}.", name(&x.data.me)));
                         }
                         state.board.swap_entities(source, target);
-                        state.board.entities[eid].dir = dir;
                     }
                     ActionResult::failure()
                 }
                 Status::Free => {
-                    state.board.entities[eid].dir = dir;
                     state.board.move_entity(eid, target);
                     ActionResult::success_turns(turns)
                 }
