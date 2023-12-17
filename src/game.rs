@@ -47,7 +47,9 @@ const BFS_LIMIT_ATTACK: i32 = 8;
 const BFS_LIMIT_WANDER: i32 = 64;
 
 const PLAYER_KEY: char = 'a';
+const RETURN_KEY: char = 'r';
 const PARTY_KEYS: [char; 6] = ['a', 's', 'd', 'f', 'g', 'h'];
+const ATTACK_KEYS: [char; 4] = ['a', 's', 'd', 'f'];
 const SUMMON_KEYS: [char; 3] = ['s', 'd', 'f'];
 
 #[derive(Eq, PartialEq)]
@@ -1099,6 +1101,35 @@ fn process_input(state: &mut State, input: Input) {
     let tab = input == Input::Char('\t') || input == Input::BackTab;
     let enter = input == Input::Char('\n') || input == Input::Char('.');
 
+    if let Some(x) = &mut state.menu {
+        let summon = &state.board.entities[player.data.summons[x.summon as usize]];
+        let attack = summon.data.me.attacks.len() as i32;
+        let chosen = if enter { x.index } else {
+            ATTACK_KEYS.iter().position(|x| input == Input::Char(*x))
+                .map(|x| x as i32).unwrap_or(-1)
+        };
+
+        let count = ATTACK_KEYS.len() as i32 + 1;
+        let valid = |x: i32| { x == count - 1 || 0 <= x && x < attack };
+        let dir = if let Input::Char(x) = input { get_direction(x) } else { None };
+
+        if let Some(dir) = dir && dir.0 == 0 {
+            loop {
+                x.index += dir.1;
+                if x.index >= count { x.index = 0; }
+                if x.index < 0 { x.index = max(count - 1, 0); }
+                if valid(x.index) { break; }
+            }
+        } else if chosen >= 0 {
+            state.board.log_menu("Canceled.", 0x234);
+            state.menu = None;
+        } else if input == Input::Escape {
+            state.board.log_menu("Canceled.", 0x234);
+            state.menu = None;
+        }
+        return;
+    }
+
     if let Some(x) = &mut state.choice {
         let choice = if enter {
             Some(*x as usize)
@@ -1229,6 +1260,10 @@ fn process_input(state: &mut State, input: Input) {
     if let Some(i) = index && i >= player.data.summons.len() {
         state.board.log_menu("Choose a Pokemon to send out with J/K:", 0x234);
         state.choice = Some(0);
+        return;
+    } else if let Some(i) = index {
+        state.board.log_menu("Choose a command with J/K:", 0x234);
+        state.menu = Some(Menu { index: 0, summon: i as i32 });
         return;
     }
 
@@ -1469,18 +1504,25 @@ impl UI {
         }
     }
 
-    fn render_status(&self, buffer: &mut Buffer, trainer: &Trainer) {
+    fn render_status(&self, buffer: &mut Buffer, trainer: &Trainer,
+                     menu: Option<&Menu>, summon: Option<&Pokemon>) {
+        assert!(menu.is_some() == summon.is_some());
         let slice = &mut Slice::new(buffer, self.status);
         let known = &*trainer.known;
         if let Some(view) = known.get_view_of(trainer.id().eid()) {
-            self.render_entity(Some(PLAYER_KEY), None, view, slice);
+            let key = if menu.is_some() { '-' } else { PLAYER_KEY };
+            self.render_entity(Some(key), None, view, slice);
         }
         for (i, key) in SUMMON_KEYS.iter().enumerate() {
+            let key = if menu.is_some() { '-' } else { *key };
             let eid = trainer.data.summons.get(i).map(|x| x.eid());
             if let Some(view) = eid.and_then(|x| known.get_view_of(x)) {
-                self.render_entity(Some(*key), None, view, slice);
+                self.render_entity(Some(key), None, view, slice);
+                if let Some(x) = menu && x.summon == i as i32 {
+                    self.render_menu(slice, x.index, summon.unwrap());
+                }
             } else {
-                self.render_empty_option(*key, 0, slice);
+                self.render_empty_option(key, 0, slice);
             }
         }
     }
@@ -1573,6 +1615,25 @@ impl UI {
     }
 
     // High-level private helpers
+
+    fn render_menu(&self, slice: &mut Slice, index: i32, summon: &Pokemon) {
+        let spaces = UI::render_key('-').chars().count();
+
+        for (i, key) in ATTACK_KEYS.iter().enumerate() {
+            let prefix = if index == i as i32 { " > " } else { "  " };
+            let attack = summon.data.me.attacks.get(i);
+            let name = attack.map(|x| x.name).unwrap_or("---");
+            let fg = if attack.is_some() { None } else { Some(0x111.into()) };
+            slice.set_fg(fg).spaces(spaces).write_str(prefix);
+            slice.write_str(&Self::render_key(*key)).write_str(name);
+            slice.newline().newline();
+        }
+
+        let prefix = if index == ATTACK_KEYS.len() as i32 { " > " } else { "  " };
+        slice.spaces(spaces).write_str(prefix);
+        slice.write_str(&Self::render_key(RETURN_KEY)).write_str("Call back");
+        slice.newline().newline();
+    }
 
     fn render_empty_option(&self, key: char, space: i32, slice: &mut Slice) {
         let n = space as usize;
@@ -1743,6 +1804,11 @@ struct Focus {
     vision: Vision,
 }
 
+struct Menu {
+    index: i32,
+    summon: i32,
+}
+
 enum TargetData {
     FarLook,
     Summon { index: usize, range: i32 },
@@ -1765,6 +1831,7 @@ pub struct State {
     choice: Option<i32>,
     target: Option<Box<Target>>,
     player: TID,
+    menu: Option<Menu>,
     ui: UI,
 }
 
@@ -1819,6 +1886,7 @@ impl State {
             choice: None,
             target: None,
             player: tid,
+            menu: None,
         }
     }
 
@@ -1896,9 +1964,11 @@ impl State {
             }
         }
 
+        let menu = self.menu.as_ref();
         let target = self.target.as_ref().map(|x| x.as_ref());
+        let summon = menu.map(|x| &self.board.entities[player.data.summons[x.summon as usize]]);
 
-        self.ui.render_status(buffer, player);
+        self.ui.render_status(buffer, player, menu, summon);
         self.ui.render_rivals(buffer, player, target);
         self.ui.render_target(buffer, player, target);
         self.ui.render_log(buffer, &self.board.log);
