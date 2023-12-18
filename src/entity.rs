@@ -10,7 +10,7 @@ use slotmap::{DefaultKey, Key, KeyData, SlotMap};
 use crate::{cast, static_assert_size};
 use crate::base::{Glyph, HashMap, Point};
 use crate::effect::{Effect, self};
-use crate::game::{AIState, Board};
+use crate::game::{AIState, Board, Command};
 use crate::knowledge::Knowledge;
 
 //////////////////////////////////////////////////////////////////////////////
@@ -130,6 +130,7 @@ pub struct PokemonIndividualData {
 pub struct PokemonData {
     pub ai: Cell<Option<Box<AIState>>>,
     pub me: Box<PokemonIndividualData>,
+    pub commands: Cell<Vec<Command>>,
 }
 
 pub struct TrainerData {
@@ -186,6 +187,7 @@ fn pokemon(eid: EID, args: &PokemonArgs) -> Entity {
     let data = PokemonData {
         ai: Cell::default(),
         me: individual(args.species, None),
+        commands: Cell::default(),
     };
     let entity = EntityData {
         eid,
@@ -203,7 +205,11 @@ fn pokemon(eid: EID, args: &PokemonArgs) -> Entity {
 }
 
 fn summons(eid: EID, args: SummonArgs) -> Entity {
-    let data = PokemonData { ai: Cell::default(), me: args.me };
+    let data = PokemonData {
+        ai: Cell::default(),
+        me: args.me,
+        commands: Cell::default(),
+    };
     let entity = EntityData {
         eid,
         player: false,

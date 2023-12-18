@@ -353,7 +353,9 @@ impl Board {
         match removed {
             Entity::Pokemon(x) => {
                 if let Some(tid) = x.data.me.trainer {
-                    for edge in &mut self.entities[tid].data.pokemon {
+                    let trainer = &mut self.entities[tid];
+                    trainer.data.summons.retain(|x| x.eid() != eid);
+                    for edge in &mut trainer.data.pokemon {
                         if let PokemonEdge::Out(z) = edge && z.eid() == eid {
                             *edge = PokemonEdge::In(x.data.me);
                             break;
@@ -560,14 +562,20 @@ fn select_valid_target(state: &mut State) -> Option<EID> {
 
 // Game logic
 
+pub enum Command {
+    Return,
+}
+
 pub struct MoveData { dir: Point, turns: f64 }
 
 pub enum Action {
     Idle,
     Look(Point),
     Move(MoveData),
+    Shout(PID, Command),
     Summon(usize, Point),
     WaitForInput,
+    Withdraw(PID),
 }
 
 struct ActionResult {
@@ -929,6 +937,42 @@ fn defend_at_pos(source: Point, trainer: &Trainer) -> Option<Point> {
     best_point
 }
 
+fn has_line_of_sight(source: Point, target: Point, known: &Knowledge, range: i32) -> bool {
+    if (source - target).len_nethack() > range { return false; }
+    if !known.can_see_now(target) { return false; }
+    let los = LOS(source, target);
+    let last = los.len() - 1;
+    los.iter().enumerate().all(|(i, p)| {
+        if i == 0 || i == last { return true; }
+        known.get_status(*p) == Some(Status::Free)
+    })
+}
+
+fn path_to_target<F: Fn(Point) -> bool>(
+        entity: &Entity, target: Point, known: &Knowledge, range: i32, valid: F) -> Action {
+    let check = |p: Point| {
+        if p == entity.pos { return Status::Free; }
+        known.get_status(p).unwrap_or(Status::Free)
+    };
+    let source = entity.pos;
+    let result = BFS(source, &valid, BFS_LIMIT_ATTACK, check);
+    let mut dirs = result.map(|x| x.dirs).unwrap_or_default();
+    if valid(source) { dirs.push(Point::default()); }
+
+    if !dirs.is_empty() {
+        let scores: Vec<_> = dirs.iter().map(
+            |x| ((*x + source - target).len_nethack() - range).abs()).collect();
+        let best = *scores.iter().reduce(|acc, x| min(acc, x)).unwrap();
+        let opts: Vec<_> = dirs.iter().enumerate().filter(|(i, _)| scores[*i] == best).collect();
+        return Action::Move(MoveData { dir: *sample(&opts).1, turns: 1. });
+    }
+
+    let path = AStar(source, target, ASTAR_LIMIT_ATTACK, check);
+    let dir = path.and_then(|x| if x.is_empty() { None } else { Some(x[0] - source) });
+    let dir = dir.unwrap_or_else(|| *sample(&dirs::ALL));
+    Action::Move(MoveData { dir, turns: 1. })
+}
+
 fn defend_leader(pokemon: &Pokemon, trainer: &Trainer) -> Option<Action> {
     // TODO(shaunak): Combine our knowledge and our leader's here.
     let known = &*trainer.known;
@@ -937,6 +981,18 @@ fn defend_leader(pokemon: &Pokemon, trainer: &Trainer) -> Option<Action> {
     let path = AStar(pokemon.pos, goal, ASTAR_LIMIT_ATTACK, check)?;
     if path.is_empty() { return Some(Action::Idle); }
     Some(Action::Move(MoveData { dir: (path[0] - pokemon.pos), turns: 1. }))
+}
+
+fn follow_command(pokemon: &Pokemon, trainer: &Trainer, command: &Command) -> Action {
+    // TODO(shaunak): Combine our knowledge and our leader's here.
+    let known = &*trainer.known;
+    match command {
+        Command::Return => {
+            let range = SUMMON_RANGE;
+            let valid = |x| has_line_of_sight(trainer.pos, x, known, range);
+            path_to_target(pokemon, trainer.pos, known, range, valid)
+        }
+    }
 }
 
 fn follow_leader(pokemon: &Pokemon, trainer: &Trainer) -> Action {
@@ -966,6 +1022,15 @@ fn plan_pokemon(board: &Board, pokemon: &Pokemon) -> Action {
         Some(tid) => &board.entities[tid],
         None => return plan_wild_pokemon(pokemon),
     };
+
+    let commands = pokemon.data.commands.take();
+    while !commands.is_empty() {
+        let action = follow_command(pokemon, trainer, &commands[0]);
+        pokemon.data.commands.set(commands);
+        return action;
+    }
+    if 1 == 1 { return plan_wild_pokemon(pokemon); }
+
     //let ready = move_ready(pokemon);
     //if !ready && let Some(x) = defend_leader(pokemon, trainer) { return x;  }
     // (use attacks here!)
@@ -977,6 +1042,18 @@ fn plan_pokemon(board: &Board, pokemon: &Pokemon) -> Action {
 fn plan(board: &Board, eid: EID, input: &mut Action) -> Action {
     let entity = &board.entities[eid];
     if entity.player {
+        for pid in &cast!(entity, Entity::Trainer).data.summons {
+            let summon = &board.entities[*pid];
+            let mut commands = summon.data.commands.take();
+            let mut result = None;
+            if let Some(Command::Return) = commands.iter().next() &&
+               has_line_of_sight(entity.pos, summon.pos, &entity.known, SUMMON_RANGE) {
+                result = Some(Action::Withdraw(summon.id()));
+                commands.remove(0);
+            }
+            summon.data.commands.set(commands);
+            if let Some(x) = result { return x; }
+        }
         return std::mem::replace(input, Action::WaitForInput);
     }
     match entity {
@@ -1003,6 +1080,11 @@ fn apply_effect(mut effect: Effect, what: FT, callback: CB) -> Effect {
 fn apply_summon(source: Point, target: Point, callback: CB) -> Effect {
     let effect = effect::SummonEffect(source, target);
     apply_effect(effect, FT::Summon, callback)
+}
+
+fn apply_withdraw(source: Point, target: Point, callback: CB) -> Effect {
+    let effect = effect::WithdrawEffect(source, target);
+    apply_effect(effect, FT::Withdraw, callback)
 }
 
 fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
@@ -1044,6 +1126,29 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 }
             }
         }
+        Action::Shout(pid, command) => {
+            let trainer = match &state.board.entities[eid] {
+                Entity::Trainer(x) => x,
+                _ => return ActionResult::failure(),
+            };
+            let pokemon = match state.board.entities.get(pid) {
+                Some(x) if x.data.me.trainer.map(|x| x.eid()) == Some(eid) => x,
+                _ => return ActionResult::failure(),
+            };
+            let (tid, name) = (trainer.id(), name(&pokemon.data.me));
+            let (source, target) = (trainer.pos, pokemon.pos);
+            if matches!(command, Command::Return) &&
+               has_line_of_sight(source, target, &trainer.known, SUMMON_RANGE) {
+                shout(&mut state.board, tid, &format!("{}, return!", name));
+                let cb = move |board: &mut Board| board.remove_entity(pid.eid());
+                state.board.add_effect(apply_withdraw(source, target, Box::new(cb)));
+                return ActionResult::success();
+            }
+            shout(&mut state.board, tid, &format!("{}, return!", name));
+            let pokemon = &mut state.board.entities[pid];
+            pokemon.data.commands.get_mut().push(command);
+            ActionResult::success()
+        }
         Action::Summon(index, target) => {
             let trainer = match &state.board.entities[eid] {
                 Entity::Trainer(x) => x,
@@ -1070,6 +1175,30 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 trainer.data.summons.push(pid);
             };
             state.board.add_effect(apply_summon(source, target, Box::new(cb)));
+            ActionResult::success()
+        }
+        Action::Withdraw(pid) => {
+            let trainer = match &state.board.entities[eid] {
+                Entity::Trainer(x) => x,
+                _ => return ActionResult::failure(),
+            };
+            let pokemon = match state.board.entities.get(pid) {
+                Some(x) if x.data.me.trainer.map(|x| x.eid()) == Some(eid) => x,
+                _ => return ActionResult::failure(),
+            };
+            let (source, target) = (trainer.pos, pokemon.pos);
+            if !has_line_of_sight(source, target, &trainer.known, SUMMON_RANGE) {
+                return ActionResult::failure();
+            }
+            let name = name(&pokemon.data.me);
+            let message = if trainer.player {
+                format!("You withdraw {}.", name)
+            } else {
+                format!("{} withdraws {}.", trainer.data.name, name)
+            };
+            state.board.log_color(message, 0x234);
+            let cb = move |board: &mut Board| board.remove_entity(pid.eid());
+            state.board.add_effect(apply_withdraw(source, target, Box::new(cb)));
             ActionResult::success()
         }
     }
@@ -1104,13 +1233,12 @@ fn process_input(state: &mut State, input: Input) {
     if let Some(x) = &mut state.menu {
         let summon = &state.board.entities[player.data.summons[x.summon as usize]];
         let attack = summon.data.me.attacks.len() as i32;
-        let chosen = if enter { x.index } else {
-            ATTACK_KEYS.iter().position(|x| input == Input::Char(*x))
-                .map(|x| x as i32).unwrap_or(-1)
-        };
-
         let count = ATTACK_KEYS.len() as i32 + 1;
         let valid = |x: i32| { x == count - 1 || 0 <= x && x < attack };
+        let chosen = if enter { x.index } else {
+            ATTACK_KEYS.iter().position(|x| input == Input::Char(*x)).map(|x| x as i32)
+                .unwrap_or(if input == Input::Char(RETURN_KEY) { count - 1} else { -1})
+        };
         let dir = if let Input::Char(x) = input { get_direction(x) } else { None };
 
         if let Some(dir) = dir && dir.0 == 0 {
@@ -1121,8 +1249,13 @@ fn process_input(state: &mut State, input: Input) {
                 if valid(x.index) { break; }
             }
         } else if chosen >= 0 {
-            state.board.log_menu("Canceled.", 0x234);
-            state.menu = None;
+            if chosen == count - 1 {
+                state.input = Action::Shout(summon.id(), Command::Return);
+                state.menu = None;
+            } else {
+                state.board.log_menu("Canceled.", 0x234);
+                state.menu = None;
+            }
         } else if input == Input::Escape {
             state.board.log_menu("Canceled.", 0x234);
             state.menu = None;
@@ -1453,7 +1586,7 @@ impl UI {
         for eid in entity.friends() {
             if let Some(friend) = known.get_view_of(eid) && friend.age > 0 {
                 let Point(x, y) = friend.pos - offset;
-                slice.set(Point(2 * x, y), Glyph::char('?'));
+                slice.set(Point(2 * x, y), Glyph::wide('?'));
             }
         }
 

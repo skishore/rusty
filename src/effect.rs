@@ -254,7 +254,7 @@ fn RayEffect(source: Point, target: Point, speed: i32) -> Effect {
     let denom = ((line.len() - 2 + speed as usize) % speed as usize) as i32;
     let start = if denom == 0 { speed } else { denom } as usize;
     for i in (start..line.len() - 1).step_by(speed as usize) {
-        result.push((0..i).map(|j| Particle { point: line[j], glyph }).collect());
+        result.push((0..i).map(|j| Particle { point: line[j + 1], glyph }).collect());
     }
     Effect::new(result)
 }
