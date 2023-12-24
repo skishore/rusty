@@ -13,7 +13,8 @@ use crate::pathing::Status;
 
 // Constants
 
-const MAX_MEMORY: i32 = 1024;
+const MAX_ENTITY_MEMORY: usize = 32;
+const MAX_TILE_MEMORY: usize = 4096;
 
 const VISION_ANGLE: f64 = TAU / 3.;
 const VISION_RADIUS: i32 = 3;
@@ -244,7 +245,7 @@ impl Knowledge {
     // Writes
 
     pub fn update(&mut self, me: &Entity, view: &BoardView, vision: &Vision) {
-        self.forget(me.player);
+        self.age_out(me.player);
 
         // Entities have approximate knowledge about friends, even if unseen.
         for eid in me.friends() {
@@ -270,6 +271,8 @@ impl Knowledge {
                 self.mark_entity_moved(other, *point);
             }
         }
+
+        self.forget(me.player);
     }
 
     // Private helpers
@@ -279,10 +282,9 @@ impl Knowledge {
         let index = *self.entity_by_id.entry(other.id()).and_modify(|x| {
             let existing = &mut self.entities[x.0 as usize];
             if !existing.moved && !(seen && existing.pos == other.pos) {
-                self.map.entry(existing.pos).and_modify(|y| {
-                    assert!(y.index == Some(*x));
-                    y.index = None;
-                });
+                let cell = self.map.get_mut(&existing.pos).unwrap();
+                assert!(cell.index == Some(*x));
+                cell.index = None;
             };
         }).or_insert_with(|| {
             self.entities.push(EntityKnowledge {
@@ -325,39 +327,59 @@ impl Knowledge {
         &mut self.entities[index.0 as usize]
     }
 
-    fn forget(&mut self, player: bool) {
+    fn age_out(&mut self, player: bool) {
         if player {
             self.map.iter_mut().for_each(|x| x.1.age = 1);
             self.entities.iter_mut().for_each(|x| x.age = 1);
             return;
         }
 
-        let mut removed: Vec<(Point, Option<EntityIndex>)> = vec![];
-        for (key, val) in self.map.iter_mut() {
-            val.age += 1;
-            if val.age >= MAX_MEMORY { removed.push((*key, val.index)); }
-        }
-        removed.iter().for_each(|x| {
-            self.map.remove(&x.0);
-            if let Some(eid) = x.1 { self.mark_entity_moved(eid, x.0); }
-        });
+        for x in self.map.values_mut() { x.age += 1; }
+        for x in &mut self.entities { x.age += 1; }
+    }
 
-        let mut removed: Vec<EntityIndex> = vec![];
-        for (i, val) in self.entities.iter_mut().enumerate() {
-            val.age += 1;
-            if val.age >= MAX_MEMORY { removed.push(EntityIndex(i as i32)); }
+    fn forget(&mut self, player: bool) {
+        if player { return; }
+
+        let age_to_forget = |mut ages: Vec<i32>, limit: usize| -> Option<i32> {
+            assert!(limit > 0);
+            if ages.len() < limit as usize { return None; }
+            Some(*ages.select_nth_unstable(limit - 1).1 + 1)
+        };
+
+        let ages = self.map.values().map(|x| x.age).collect();
+        if let Some(age) = age_to_forget(ages, MAX_TILE_MEMORY) {
+            let mut removed: Vec<(Point, Option<EntityIndex>)> = vec![];
+            for (key, val) in self.map.iter_mut() {
+                if val.age >= age { removed.push((*key, val.index)); }
+            }
+            for (key, eid) in &removed {
+                self.map.remove(key);
+                if let Some(x) = eid { self.mark_entity_moved(*x, *key); }
+            }
         }
-        removed.iter().rev().for_each(|x| { self.remove_entity(*x); });
+
+        let ages = self.entities.iter().map(|x| x.age).collect();
+        if let Some(age) = age_to_forget(ages, MAX_ENTITY_MEMORY) {
+            let mut removed: Vec<EntityIndex> = vec![];
+            for (i, val) in self.entities.iter().enumerate() {
+                if val.age >= age && !val.friend {
+                    removed.push(EntityIndex(i as i32));
+                }
+            }
+            removed.iter().rev().for_each(|x| { self.remove_entity(*x); });
+        }
     }
 
     fn mark_entity_moved(&mut self, index: EntityIndex, pos: Point) {
         let entity = self.entity_mut(index);
         assert!(entity.pos == pos);
+        assert!(!entity.moved);
         entity.moved = true;
     }
 
     fn remove_entity(&mut self, index: EntityIndex) {
-        let eid = self.entity_raw(index).eid;
+        let EntityKnowledge { eid, pos, moved, .. } = *self.entity_raw(index);
         let popped = self.entities.pop().unwrap();
         let popped_index = EntityIndex(self.entities.len() as i32);
         let swap = index != popped_index;
@@ -366,6 +388,12 @@ impl Knowledge {
             let cell = self.map.get_mut(&popped.pos).unwrap();
             assert!(cell.index == Some(popped_index));
             cell.index = if swap { Some(index) } else { None };
+        }
+
+        if swap && !moved {
+            let cell = self.map.get_mut(&pos).unwrap();
+            assert!(cell.index == Some(index));
+            cell.index = None;
         }
 
         let deleted = if swap {
