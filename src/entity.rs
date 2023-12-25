@@ -160,7 +160,6 @@ pub struct SummonArgs {
     pub pos: Point,
     pub dir: Point,
     pub me: Box<PokemonIndividualData>,
-    pub trainer: TID,
 }
 
 pub struct TrainerArgs<'a> {
@@ -184,24 +183,8 @@ fn individual(species: &str, trainer: Option<TID>) -> Box<PokemonIndividualData>
 }
 
 fn pokemon(eid: EID, args: &PokemonArgs) -> Entity {
-    let data = PokemonData {
-        ai: Cell::default(),
-        me: individual(args.species, None),
-        commands: Cell::default(),
-    };
-    let entity = EntityData {
-        eid,
-        player: false,
-        removed: false,
-        move_timer: 0,
-        turn_timer: 0,
-        glyph: data.me.species.glyph,
-        speed: data.me.species.speed,
-        dir: args.dir,
-        pos: args.pos,
-        known: Box::default(),
-    };
-    Entity::Pokemon(Pokemon { entity, data: Box::new(data) })
+    let me = individual(args.species, None);
+    summons(eid, SummonArgs { pos: args.pos, dir: args.dir, me })
 }
 
 fn summons(eid: EID, args: SummonArgs) -> Entity {

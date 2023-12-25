@@ -1166,7 +1166,7 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 let trainer = &mut board.entities[tid];
                 let me = cast!(trainer.data.pokemon.remove(index), PokemonEdge::In);
                 let dir = target - trainer.pos;
-                let arg = SummonArgs { pos: target, dir, me, trainer: trainer.id() };
+                let arg = SummonArgs { pos: target, dir, me };
                 let pid = board.add_summoned_pokemon(arg);
                 let trainer = &mut board.entities[tid];
                 trainer.data.pokemon.insert(index, PokemonEdge::Out(pid));
