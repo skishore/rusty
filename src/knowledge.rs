@@ -200,46 +200,71 @@ pub struct Knowledge {
     pub focus: Option<EID>,
 }
 
-impl Knowledge {
-    // Reads
+pub struct CellResult<'a> {
+    root: &'a Knowledge,
+    cell: Option<&'a CellKnowledge>,
+}
 
-    pub fn get_cell(&self, p: Point) -> Option<&CellKnowledge> {
-        self.map.get(&p)
+impl<'a> CellResult<'a> {
+    // Field lookups
+
+    pub fn age(&self) -> i32 {
+        self.cell.map(|x| x.age).unwrap_or(std::i32::MAX)
     }
 
-    pub fn get_entity(&self, cell: &CellKnowledge) -> Option<&EntityKnowledge> {
-        cell.index.map(|eid| self.entity_raw(eid))
+    pub fn tile(&self) -> Option<&'static Tile> {
+        self.cell.map(|x| x.tile)
     }
 
-    pub fn get_entity_at(&self, p: Point) -> Option<&EntityKnowledge> {
-        self.get_entity(self.get_cell(p)?)
+    pub fn visibility(&self) -> i32 {
+        self.cell.map(|x| x.visibility).unwrap_or(-1)
     }
 
-    pub fn get_status(&self, p: Point) -> Option<Status> {
-        self.get_cell(p).map(|x| {
+    // Derived fields
+
+    pub fn entity(&self) -> Option<&'a EntityKnowledge> {
+        self.cell.and_then(|x| x.index.map(|y| self.root.entity_raw(y)))
+    }
+
+    pub fn status(&self) -> Option<Status> {
+        self.cell.map(|x| {
             if x.index.is_some() { return Status::Occupied; }
             if x.tile.blocked() { Status::Blocked } else { Status::Free }
         })
     }
 
-    pub fn get_view_of(&self, eid: EID) -> Option<&EntityKnowledge> {
+    // Predicates
+
+    pub fn blocked(&self) -> bool {
+        self.cell.map(|x| x.tile.blocked()).unwrap_or(false)
+    }
+
+    pub fn unblocked(&self) -> bool {
+        self.cell.map(|x| !x.tile.blocked()).unwrap_or(false)
+    }
+
+    pub fn visible(&self) -> bool {
+        self.cell.map(|x| x.age == 0).unwrap_or(false)
+    }
+
+    pub fn was_visible(&self) -> bool {
+        self.cell.is_some()
+    }
+}
+
+impl Knowledge {
+    // Reads
+
+    pub fn default(&self) -> CellResult {
+        CellResult { root: self, cell: None }
+    }
+
+    pub fn entity(&self, eid: EID) -> Option<&EntityKnowledge> {
         self.entity_by_id.get(&eid).map(|x| self.entity_raw(*x))
     }
 
-    pub fn can_see_now(&self, p: Point) -> bool {
-        self.get_cell(p).map(|x| x.age == 0).unwrap_or(false)
-    }
-
-    pub fn remembers(&self, p: Point) -> bool {
-        self.map.contains_key(&p)
-    }
-
-    pub fn blocked(&self, p: Point) -> bool {
-        self.get_cell(p).map(|x| x.tile.blocked()).unwrap_or(false)
-    }
-
-    pub fn unblocked(&self, p: Point) -> bool {
-        self.get_cell(p).map(|x| !x.tile.blocked()).unwrap_or(false)
+    pub fn get(&self, p: Point) -> CellResult {
+        CellResult { root: self, cell: self.map.get(&p) }
     }
 
     // Writes

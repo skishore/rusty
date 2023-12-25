@@ -15,7 +15,7 @@ use crate::entity::{Entity, Pokemon, Trainer};
 use crate::entity::{PokemonArgs, SummonArgs, TrainerArgs};
 use crate::entity::{PokemonEdge, PokemonIndividualData, PokemonSpeciesData};
 use crate::knowledge::{Knowledge, Vision, VisionArgs, get_pp, get_hp};
-use crate::knowledge::{CellKnowledge, EntityKnowledge, EntityView, PokemonView};
+use crate::knowledge::{EntityKnowledge, EntityView, PokemonView};
 use crate::pathing::{AStar, DijkstraMap, DijkstraMode};
 use crate::pathing::{BFS, BFSResult, Status};
 
@@ -512,7 +512,7 @@ fn update_target(known: &Knowledge, target: &mut Target, update: Point) {
     match &target.data {
         TargetData::FarLook => {
             for (i, x) in target.path.iter().enumerate() {
-                if known.can_see_now(x.0) { okay_until = i + 1; }
+                if known.get(x.0).visible() { okay_until = i + 1; }
             }
             if okay_until < target.path.len() {
                 target.error = "You can't see a clear path there.".into();
@@ -523,11 +523,12 @@ fn update_target(known: &Knowledge, target: &mut Target, update: Point) {
                 target.error = "There's something in the way.".into();
             }
             for (i, x) in target.path.iter().enumerate() {
-                if known.get_status(x.0).unwrap_or(Status::Free) != Status::Free {
+                let cell = known.get(x.0);
+                if cell.status().unwrap_or(Status::Free) != Status::Free {
                     target.error = "There's something in the way.".into();
                 } else if !(x.0 - target.source).in_l2_range(*range) {
                     target.error = "You can't throw that far.".into();
-                } else if !known.can_see_now(x.0) {
+                } else if !cell.visible() {
                     target.error = "You can't see a clear path there.".into();
                 }
                 if !target.error.is_empty() { break; }
@@ -544,7 +545,7 @@ fn update_target(known: &Knowledge, target: &mut Target, update: Point) {
 fn select_valid_target(state: &mut State) -> Option<EID> {
     let known = &*state.board.entities[state.player].known;
     let target = state.target.as_ref()?;
-    let entity = known.get_entity_at(target.target);
+    let entity = known.get(target.target).entity();
 
     match &target.data {
         TargetData::FarLook => {
@@ -692,15 +693,14 @@ fn explore_near(entity: &Entity, source: Point, age: i32, turns: f64) -> Action 
     let (known, pos) = (&*entity.known, entity.pos);
     let check = |p: Point| {
         if p == pos { return Status::Free; }
-        entity.known.get_status(p).unwrap_or(Status::Free)
+        entity.known.get(p).status().unwrap_or(Status::Free)
     };
     let done1 = |p: Point| {
-        let cell = known.get_cell(p);
-        if cell.map(|x| x.age <= age).unwrap_or(false) { return false; }
-        dirs::ALL.iter().any(|x| known.unblocked(p + *x))
+        if known.get(p).age() <= age { return false };
+        dirs::ALL.iter().any(|x| known.get(p + *x).unblocked())
     };
     let done0 = |p: Point| {
-        done1(p) && dirs::ALL.iter().all(|x| !known.blocked(p + *x))
+        done1(p) && dirs::ALL.iter().all(|x| !known.get(p + *x).blocked())
     };
 
     let result = BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
@@ -754,12 +754,12 @@ fn flight(entity: &Entity, source: Point) -> Option<Action> {
 
     let check = |p: Point| {
         if p == pos { return Status::Free; }
-        known.get_status(p).unwrap_or(Status::Blocked)
+        known.get(p).status().unwrap_or(Status::Blocked)
     };
     DijkstraMap(DijkstraMode::Expand(limit), check, 1, &mut map);
 
     for (pos, val) in map.iter_mut() {
-        let frontier = dirs::ALL.iter().any(|x| !known.remembers(*pos + *x));
+        let frontier = dirs::ALL.iter().any(|x| !known.get(*pos + *x).was_visible());
         if frontier { *val += FOV_RADIUS_NPC; }
         *val *= -10;
     }
@@ -864,7 +864,7 @@ fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
 
 fn check_follower_square(known: &Knowledge, trainer: &Trainer,
                          target: Point, ignore_occupant: bool) -> bool {
-    let free = match known.get_status(target).unwrap_or(Status::Blocked) {
+    let free = match known.get(target).status().unwrap_or(Status::Blocked) {
         Status::Free => true,
         Status::Blocked => false,
         Status::Occupied => ignore_occupant,
@@ -876,8 +876,7 @@ fn check_follower_square(known: &Knowledge, trainer: &Trainer,
     if length > 2 { return false; }
     if length < 2 { return true; }
 
-    let vision = |p: Point| { known.get_cell(p).map(|x| x.visibility).unwrap_or(-1) };
-    vision(source) == vision(target)
+    known.get(source).visibility() == known.get(target).visibility()
 }
 
 fn defend_at_pos(source: Point, trainer: &Trainer) -> Option<Point> {
@@ -888,10 +887,9 @@ fn defend_at_pos(source: Point, trainer: &Trainer) -> Option<Point> {
     let known = &*trainer.known;
     let defended = |p: Point| {
         if p == source || p == trainer.pos { return false; }
-        let cell = known.get_cell(p);
-        let other = cell.and_then(|x| known.get_entity(x));
-        if other.map(|x| x.friend).unwrap_or(false) { return true; }
-        cell.map(|x| x.tile.blocked()).unwrap_or(true)
+        let cell = known.get(p);
+        if cell.entity().map(|x| x.friend).unwrap_or(false) { return true; }
+        !cell.unblocked()
     };
 
     let mut scores = HashMap::default();
@@ -939,12 +937,12 @@ fn defend_at_pos(source: Point, trainer: &Trainer) -> Option<Point> {
 
 fn has_line_of_sight(source: Point, target: Point, known: &Knowledge, range: i32) -> bool {
     if (source - target).len_nethack() > range { return false; }
-    if !known.can_see_now(target) { return false; }
+    if !known.get(target).visible() { return false; }
     let los = LOS(source, target);
     let last = los.len() - 1;
     los.iter().enumerate().all(|(i, p)| {
         if i == 0 || i == last { return true; }
-        known.get_status(*p) == Some(Status::Free)
+        known.get(*p).status() == Some(Status::Free)
     })
 }
 
@@ -952,7 +950,7 @@ fn path_to_target<F: Fn(Point) -> bool>(
         entity: &Entity, target: Point, known: &Knowledge, range: i32, valid: F) -> Action {
     let check = |p: Point| {
         if p == entity.pos { return Status::Free; }
-        known.get_status(p).unwrap_or(Status::Free)
+        known.get(p).status().unwrap_or(Status::Free)
     };
     let source = entity.pos;
     let result = BFS(source, &valid, BFS_LIMIT_ATTACK, check);
@@ -976,7 +974,7 @@ fn path_to_target<F: Fn(Point) -> bool>(
 fn defend_leader(pokemon: &Pokemon, trainer: &Trainer) -> Option<Action> {
     // TODO(shaunak): Combine our knowledge and our leader's here.
     let known = &*trainer.known;
-    let check = |p: Point| known.get_status(p).unwrap_or(Status::Occupied);
+    let check = |p: Point| known.get(p).status().unwrap_or(Status::Occupied);
     let goal = defend_at_pos(pokemon.pos, trainer)?;
     let path = AStar(pokemon.pos, goal, ASTAR_LIMIT_ATTACK, check)?;
     if path.is_empty() { return Some(Action::Idle); }
@@ -1011,7 +1009,7 @@ fn follow_leader(pokemon: &Pokemon, trainer: &Trainer) -> Action {
         }
     }
 
-    let check = |p: Point| known.get_status(p).unwrap_or(Status::Occupied);
+    let check = |p: Point| known.get(p).status().unwrap_or(Status::Occupied);
     let path = AStar(pp, tp, ASTAR_LIMIT_ATTACK, check).unwrap_or_default();
     let dir = if !path.is_empty() { path[0] - pp } else { *sample(&dirs::ALL) };
     Action::Move(MoveData { dir, turns: 1. })
@@ -1318,7 +1316,7 @@ fn process_input(state: &mut State, input: Input) {
     };
 
     let get_initial_target = |player: &Trainer, source: Point| -> Point {
-        let focus = known.focus.and_then(|x| known.get_view_of(x));
+        let focus = known.focus.and_then(|x| known.entity(x));
         if let Some(target) = focus && target.age == 0 { return target.pos; }
         let rival = rivals(player).into_iter().next();
         if let Some(rival) = rival { return rival.0.pos; }
@@ -1327,9 +1325,9 @@ fn process_input(state: &mut State, input: Input) {
 
     let get_updated_target = |player: &Trainer, target: Point| -> Option<Point> {
         if tab {
-            let old_eid = known.get_entity_at(target).map(|x| x.eid);
+            let old_eid = known.get(target).entity().map(|x| x.eid);
             let new_eid = apply_tab(player, old_eid, false);
-            return Some(known.get_view_of(new_eid?)?.pos);
+            return Some(known.entity(new_eid?)?.pos);
         }
 
         let ch = if let Input::Char(x) = input { Some(x) } else { None }?;
@@ -1408,13 +1406,13 @@ fn process_input(state: &mut State, input: Input) {
 fn update_focus(state: &mut State) {
     let known = &*state.board.entities[state.player].known;
     let focus = match &state.target {
-        Some(x) => known.get_entity_at(x.target),
-        None => known.focus.and_then(|x| known.get_view_of(x)),
+        Some(x) => known.get(x.target).entity(),
+        None => known.focus.and_then(|x| known.entity(x)),
     };
     if let Some(entity) = focus && can_target(entity) {
         let floor = Tile::get('.');
         let (player, pos, dir) = (entity.player, entity.pos, entity.dir);
-        let lookup = |p: Point| known.get_cell(p).map(|x| x.tile).unwrap_or(floor);
+        let lookup = |p: Point| known.get(p).tile().unwrap_or(floor);
         state.focus.vision.compute(&VisionArgs { player, pos, dir }, lookup);
         state.focus.active = true;
     } else {
@@ -1570,12 +1568,13 @@ impl UI {
         for y in 0..UI_MAP_SIZE_Y {
             for x in 0..UI_MAP_SIZE_X {
                 let point = Point(x, y) + offset;
-                let glyph = match known.get_cell(point) {
-                    Some(x) => if x.age > 0 {
-                        x.tile.glyph.with_fg(Color::gray())
-                    } else {
-                        let glyph = known.get_entity(x).map(|y| y.glyph).unwrap_or(x.tile.glyph);
+                let value = known.get(point);
+                let glyph = match value.tile() {
+                    Some(x) => if value.visible() {
+                        let glyph = value.entity().map(|y| y.glyph).unwrap_or(x.glyph);
                         if in_range(point) { glyph } else { glyph.with_fg(Color::gray()) }
+                    } else {
+                        x.glyph.with_fg(Color::gray())
                     }
                     None => unseen
                 };
@@ -1584,7 +1583,7 @@ impl UI {
         }
 
         for eid in entity.friends() {
-            if let Some(friend) = known.get_view_of(eid) && friend.age > 0 {
+            if let Some(friend) = known.entity(eid) && friend.age > 0 {
                 let Point(x, y) = friend.pos - offset;
                 slice.set(Point(2 * x, y), Glyph::wide('?'));
             }
@@ -1592,7 +1591,7 @@ impl UI {
 
         if let Some(frame) = frame {
             for effect::Particle { point, glyph } in frame {
-                if !known.can_see_now(*point) { continue; }
+                if !known.get(*point).visible() { continue; }
                 let Point(x, y) = *point - offset;
                 slice.set(Point(2 * x, y), *glyph);
             }
@@ -1642,14 +1641,14 @@ impl UI {
         assert!(menu.is_some() == summon.is_some());
         let slice = &mut Slice::new(buffer, self.status);
         let known = &*trainer.known;
-        if let Some(view) = known.get_view_of(trainer.id().eid()) {
+        if let Some(view) = known.entity(trainer.id().eid()) {
             let key = if menu.is_some() { '-' } else { PLAYER_KEY };
             self.render_entity(Some(key), None, view, slice);
         }
         for (i, key) in SUMMON_KEYS.iter().enumerate() {
             let key = if menu.is_some() { '-' } else { *key };
             let eid = trainer.data.summons.get(i).map(|x| x.eid());
-            if let Some(view) = eid.and_then(|x| known.get_view_of(x)) {
+            if let Some(view) = eid.and_then(|x| known.entity(x)) {
                 self.render_entity(Some(key), None, view, slice);
                 if let Some(x) = menu && x.summon == i as i32 {
                     self.render_menu(slice, x.index, summon.unwrap());
@@ -1674,9 +1673,8 @@ impl UI {
 
         let (cell, view, header, seen) = match &target {
             Some(x) => {
-                let cell = known.get_cell(x.target);
-                let seen = cell.map(|x| x.age == 0).unwrap_or(false);
-                let view = cell.and_then(|x| known.get_entity(x));
+                let cell = known.get(x.target);
+                let (seen, view) = (cell.visible(), cell.entity());
                 let header = match &x.data {
                     TargetData::FarLook => "Examining...".into(),
                     TargetData::Summon { index, .. } => {
@@ -1690,9 +1688,9 @@ impl UI {
                 (cell, view, header, seen)
             }
             None => {
-                let view = known.focus.and_then(|x| known.get_view_of(x));
+                let view = known.focus.and_then(|x| known.entity(x));
                 let seen = view.map(|x| x.age == 0).unwrap_or(false);
-                let cell = view.and_then(|x| known.get_cell(x.pos));
+                let cell = view.map(|x| known.get(x.pos)).unwrap_or(known.default());
                 let header = if seen {
                     "Last target:"
                 } else {
@@ -1719,7 +1717,7 @@ impl UI {
         }
 
         slice.set_fg(fg).write_str(text);
-        if let Some(CellKnowledge { tile: x, .. }) = cell {
+        if let Some(x) = cell.tile() {
             slice.write_chr(x.glyph).space();
             slice.write_chr('(').write_str(x.description).write_chr(')').newline();
         } else {
