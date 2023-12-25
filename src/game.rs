@@ -487,8 +487,10 @@ fn init_summon_target(player: &Trainer, data: TargetData) -> Box<Target> {
         }
     }
 
-    options.sort_by_cached_key(|x| (*x - best).len_l2_squared());
-    let update = options.into_iter().next().unwrap_or(pos);
+    let update = (|| {
+        if options.is_empty() { return pos; }
+        *options.select_nth_unstable_by_key(0, |x| (*x - best).len_l2_squared()).1
+    })();
     update_target(known, &mut target, update);
     target
 }
@@ -711,8 +713,7 @@ fn explore_near(entity: &Entity, source: Point, age: i32, turns: f64) -> Action 
         if dirs.is_empty() || targets.is_empty() { return None; }
         let target = (|| {
             if source == pos { return *sample(&targets); }
-            targets.sort_by_cached_key(|x| (*x - pos).len_l2_squared());
-            targets[0]
+            *targets.select_nth_unstable_by_key(0, |x| (*x - pos).len_l2_squared()).1
         })();
         let path = AStar(pos, target, ASTAR_LIMIT_WANDER, check).unwrap_or(vec![]);
         if path.is_empty() { return Some(*sample(&dirs)); }
