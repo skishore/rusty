@@ -1,0 +1,1389 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="470" onload="init(evt)" viewBox="0 0 1200 470" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="470.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >Flame Graph</text>
+<text id="details" x="10.00" y="453" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="453" > </text>
+<g id="frames">
+<g >
+<title>rusty`_$LT$$RF$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::hd2fc2bc39e482d60 (3 samples, 0.02%)</title><rect x="140.1" y="165" width="0.3" height="15.0" fill="rgb(241,90,36)" rx="2" ry="2" />
+<text  x="143.09" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_malloc_zone_realloc (2 samples, 0.02%)</title><rect x="255.1" y="37" width="0.1" height="15.0" fill="rgb(234,51,30)" rx="2" ry="2" />
+<text  x="258.07" y="47.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve_for_push::h1d5d6c4658229465 (69 samples, 0.54%)</title><rect x="926.6" y="197" width="6.4" height="15.0" fill="rgb(234,167,41)" rx="2" ry="2" />
+<text  x="929.60" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$termion..input..Keys$LT$R$GT$$u20$as$u20$core..iter..traits..iterator..Iterator$GT$::next::h49861420e1e9523f (3 samples, 0.02%)</title><rect x="12.2" y="245" width="0.3" height="15.0" fill="rgb(249,23,22)" rx="2" ry="2" />
+<text  x="15.21" y="255.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread.dylib`_pthread_exit_if_canceled (6 samples, 0.05%)</title><rect x="1128.5" y="213" width="0.5" height="15.0" fill="rgb(217,35,40)" rx="2" ry="2" />
+<text  x="1131.46" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free (2 samples, 0.02%)</title><rect x="949.9" y="181" width="0.2" height="15.0" fill="rgb(212,84,15)" rx="2" ry="2" />
+<text  x="952.91" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::hd2fc2bc39e482d60 (12 samples, 0.09%)</title><rect x="143.1" y="165" width="1.1" height="15.0" fill="rgb(246,137,52)" rx="2" ry="2" />
+<text  x="146.13" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`tiny_free_no_lock (3 samples, 0.02%)</title><rect x="959.9" y="149" width="0.2" height="15.0" fill="rgb(205,68,34)" rx="2" ry="2" />
+<text  x="962.86" y="159.5" ></text>
+</g>
+<g >
+<title>all (12,808 samples, 100%)</title><rect x="10.0" y="421" width="1180.0" height="15.0" fill="rgb(253,176,6)" rx="2" ry="2" />
+<text  x="13.00" y="431.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_szone_free (2 samples, 0.02%)</title><rect x="928.0" y="117" width="0.2" height="15.0" fill="rgb(220,149,40)" rx="2" ry="2" />
+<text  x="930.98" y="127.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`cerror (2 samples, 0.02%)</title><rect x="1129.0" y="229" width="0.2" height="15.0" fill="rgb(233,150,17)" rx="2" ry="2" />
+<text  x="1132.01" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_nanov2_free (3 samples, 0.02%)</title><rect x="630.1" y="213" width="0.3" height="15.0" fill="rgb(215,79,5)" rx="2" ry="2" />
+<text  x="633.13" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_nanov2_free (2 samples, 0.02%)</title><rect x="140.4" y="197" width="0.1" height="15.0" fill="rgb(231,108,14)" rx="2" ry="2" />
+<text  x="143.36" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread.dylib`pthread_mutex_unlock (2 samples, 0.02%)</title><rect x="142.9" y="165" width="0.2" height="15.0" fill="rgb(207,145,44)" rx="2" ry="2" />
+<text  x="145.94" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`std::io::Write::write_all::h6fa931aae3128461 (5 samples, 0.04%)</title><rect x="139.9" y="197" width="0.5" height="15.0" fill="rgb(250,103,3)" rx="2" ry="2" />
+<text  x="142.90" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`std::sys::unix::time::Timespec::now::ha372ac2cac9b15a0 (2 samples, 0.02%)</title><rect x="1126.1" y="245" width="0.1" height="15.0" fill="rgb(253,209,28)" rx="2" ry="2" />
+<text  x="1129.06" y="255.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_free_list_remove_ptr_no_clear (2 samples, 0.02%)</title><rect x="1005.3" y="133" width="0.2" height="15.0" fill="rgb(241,41,49)" rx="2" ry="2" />
+<text  x="1008.28" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$T$u20$as$u20$core..fmt..Debug$GT$::fmt::h80f05a8f74d6e3b4 (5 samples, 0.04%)</title><rect x="255.3" y="149" width="0.5" height="15.0" fill="rgb(231,152,39)" rx="2" ry="2" />
+<text  x="258.34" y="159.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`tiny_size (2 samples, 0.02%)</title><rect x="932.6" y="133" width="0.2" height="15.0" fill="rgb(239,53,52)" rx="2" ry="2" />
+<text  x="935.59" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..stdio..StdoutLock$u20$as$u20$std..io..Write$GT$::write::h4319ab31504156d8 (9 samples, 0.07%)</title><rect x="143.4" y="149" width="0.8" height="15.0" fill="rgb(245,13,4)" rx="2" ry="2" />
+<text  x="146.40" y="159.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread.dylib`_pthread_start (34 samples, 0.27%)</title><rect x="1186.9" y="389" width="3.1" height="15.0" fill="rgb(249,176,6)" rx="2" ry="2" />
+<text  x="1189.87" y="399.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::builders::DebugTuple::field::h93a0a71a909e896f (24 samples, 0.19%)</title><rect x="254.8" y="165" width="2.2" height="15.0" fill="rgb(237,68,3)" rx="2" ry="2" />
+<text  x="257.79" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::raw::RawTable$LT$T$C$A$GT$::remove_entry::h27e3a78b70ef7a0f (2 samples, 0.02%)</title><rect x="261.9" y="213" width="0.2" height="15.0" fill="rgb(239,167,22)" rx="2" ry="2" />
+<text  x="264.88" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`nanov2_realloc (5 samples, 0.04%)</title><rect x="660.2" y="133" width="0.4" height="15.0" fill="rgb(215,129,7)" rx="2" ry="2" />
+<text  x="663.16" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free_small (2 samples, 0.02%)</title><rect x="1004.8" y="181" width="0.2" height="15.0" fill="rgb(249,141,1)" rx="2" ry="2" />
+<text  x="1007.82" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`nanov2_malloc (2 samples, 0.02%)</title><rect x="258.9" y="229" width="0.2" height="15.0" fill="rgb(252,78,8)" rx="2" ry="2" />
+<text  x="261.94" y="239.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve_for_push::h719a972cedd9f073 (4 samples, 0.03%)</title><rect x="631.3" y="213" width="0.4" height="15.0" fill="rgb(238,82,54)" rx="2" ry="2" />
+<text  x="634.32" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::knowledge::Knowledge::unblocked::h217d46226c5a50f0 (2 samples, 0.02%)</title><rect x="668.7" y="197" width="0.2" height="15.0" fill="rgb(208,55,24)" rx="2" ry="2" />
+<text  x="671.73" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve_for_push::h1d5d6c4658229465 (10 samples, 0.08%)</title><rect x="638.0" y="197" width="1.0" height="15.0" fill="rgb(229,177,36)" rx="2" ry="2" />
+<text  x="641.05" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::base::LOS::h94e7a496ebb60b3b (3 samples, 0.02%)</title><rect x="640.3" y="197" width="0.2" height="15.0" fill="rgb(254,18,25)" rx="2" ry="2" />
+<text  x="643.26" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_malloc_should_clear (2 samples, 0.02%)</title><rect x="934.2" y="117" width="0.2" height="15.0" fill="rgb(205,188,10)" rx="2" ry="2" />
+<text  x="937.25" y="127.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_malloc_should_clear (7 samples, 0.05%)</title><rect x="551.6" y="165" width="0.7" height="15.0" fill="rgb(234,187,36)" rx="2" ry="2" />
+<text  x="554.63" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_malloc_from_free_list (4 samples, 0.03%)</title><rect x="994.2" y="133" width="0.4" height="15.0" fill="rgb(242,82,35)" rx="2" ry="2" />
+<text  x="997.22" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$termion..color..Fg$LT$C$GT$$u20$as$u20$core..fmt..Display$GT$::fmt::h6492c73f05149a5e (6 samples, 0.05%)</title><rect x="140.4" y="213" width="0.5" height="15.0" fill="rgb(240,145,37)" rx="2" ry="2" />
+<text  x="143.36" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`termion::color::AnsiValue::fg_string::h6eb4ab9bf61db638 (2 samples, 0.02%)</title><rect x="140.7" y="197" width="0.2" height="15.0" fill="rgb(213,60,34)" rx="2" ry="2" />
+<text  x="143.73" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_platform.dylib`_platform_memmove (28 samples, 0.22%)</title><rect x="929.9" y="133" width="2.6" height="15.0" fill="rgb(232,3,20)" rx="2" ry="2" />
+<text  x="932.92" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::hd2fc2bc39e482d60 (2 samples, 0.02%)</title><rect x="141.1" y="149" width="0.2" height="15.0" fill="rgb(221,139,27)" rx="2" ry="2" />
+<text  x="144.10" y="159.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`tiny_malloc_should_clear (3 samples, 0.02%)</title><rect x="660.3" y="101" width="0.2" height="15.0" fill="rgb(238,51,50)" rx="2" ry="2" />
+<text  x="663.25" y="111.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_malloc_should_clear (2 samples, 0.02%)</title><rect x="666.3" y="149" width="0.2" height="15.0" fill="rgb(213,167,13)" rx="2" ry="2" />
+<text  x="669.33" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::pathing::BFS::h72b6200bcc25d41e (284 samples, 2.22%)</title><rect x="642.7" y="213" width="26.2" height="15.0" fill="rgb(231,142,54)" rx="2" ry="2" />
+<text  x="645.75" y="223.5" >r..</text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`write (8 samples, 0.06%)</title><rect x="138.4" y="197" width="0.8" height="15.0" fill="rgb(218,193,41)" rx="2" ry="2" />
+<text  x="141.43" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::h4685264c199fcbe5 (15 samples, 0.12%)</title><rect x="142.9" y="181" width="1.3" height="15.0" fill="rgb(254,99,26)" rx="2" ry="2" />
+<text  x="145.85" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`clock_get_time (282 samples, 2.20%)</title><rect x="1129.2" y="229" width="26.0" height="15.0" fill="rgb(238,123,46)" rx="2" ry="2" />
+<text  x="1132.19" y="239.5" >l..</text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_malloc_from_free_list (4 samples, 0.03%)</title><rect x="1005.1" y="149" width="0.4" height="15.0" fill="rgb(229,209,21)" rx="2" ry="2" />
+<text  x="1008.10" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::num::imp::_$LT$impl$u20$core..fmt..Display$u20$for$u20$u16$GT$::fmt::h030c01e823d6a2c8 (8 samples, 0.06%)</title><rect x="141.8" y="181" width="0.8" height="15.0" fill="rgb(210,124,41)" rx="2" ry="2" />
+<text  x="144.84" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_realloc (7 samples, 0.05%)</title><rect x="638.3" y="165" width="0.7" height="15.0" fill="rgb(217,150,24)" rx="2" ry="2" />
+<text  x="641.33" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`__error (4 samples, 0.03%)</title><rect x="1155.3" y="245" width="0.3" height="15.0" fill="rgb(240,17,24)" rx="2" ry="2" />
+<text  x="1158.27" y="255.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_realloc (4 samples, 0.03%)</title><rect x="256.6" y="53" width="0.4" height="15.0" fill="rgb(217,58,52)" rx="2" ry="2" />
+<text  x="259.63" y="63.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_realloc (63 samples, 0.49%)</title><rect x="927.0" y="165" width="5.8" height="15.0" fill="rgb(229,188,53)" rx="2" ry="2" />
+<text  x="929.97" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::Formatter::debug_struct_field1_finish::h46e0916a1f9a8903 (7 samples, 0.05%)</title><rect x="256.4" y="133" width="0.6" height="15.0" fill="rgb(226,225,26)" rx="2" ry="2" />
+<text  x="259.36" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`__semwait_signal (317 samples, 2.48%)</title><rect x="1155.6" y="245" width="29.2" height="15.0" fill="rgb(242,144,23)" rx="2" ry="2" />
+<text  x="1158.64" y="255.5" >li..</text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_malloc_should_clear (4 samples, 0.03%)</title><rect x="994.2" y="149" width="0.4" height="15.0" fill="rgb(238,206,36)" rx="2" ry="2" />
+<text  x="997.22" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::map::HashMap$LT$K$C$V$C$S$C$A$GT$::insert::h2c0749093e96f9a0 (160 samples, 1.25%)</title><rect x="583.9" y="197" width="14.7" height="15.0" fill="rgb(229,183,14)" rx="2" ry="2" />
+<text  x="586.88" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`__semwait_signal (11 samples, 0.09%)</title><rect x="1128.0" y="229" width="1.0" height="15.0" fill="rgb(231,95,49)" rx="2" ry="2" />
+<text  x="1131.00" y="239.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::game::State::new::h9eee88f8e9e0906a (15 samples, 0.12%)</title><rect x="1185.2" y="293" width="1.4" height="15.0" fill="rgb(210,114,24)" rx="2" ry="2" />
+<text  x="1188.21" y="303.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..stdio..StdoutLock$u20$as$u20$std..io..Write$GT$::write::h4319ab31504156d8 (3 samples, 0.02%)</title><rect x="140.1" y="149" width="0.3" height="15.0" fill="rgb(233,201,48)" rx="2" ry="2" />
+<text  x="143.09" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$T$u20$as$u20$core..fmt..Debug$GT$::fmt::h0a604488e18f0261 (5 samples, 0.04%)</title><rect x="254.9" y="149" width="0.4" height="15.0" fill="rgb(207,161,18)" rx="2" ry="2" />
+<text  x="257.88" y="159.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_malloc_should_clear (6 samples, 0.05%)</title><rect x="994.1" y="165" width="0.6" height="15.0" fill="rgb(250,55,24)" rx="2" ry="2" />
+<text  x="997.13" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::raw::RawTable$LT$T$C$A$GT$::reserve_rehash::ha2c5cc5c33c9f6c1  (111 samples, 0.87%)</title><rect x="950.1" y="181" width="10.2" height="15.0" fill="rgb(234,11,48)" rx="2" ry="2" />
+<text  x="953.09" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_malloc_should_clear (3 samples, 0.02%)</title><rect x="929.3" y="101" width="0.2" height="15.0" fill="rgb(223,178,13)" rx="2" ry="2" />
+<text  x="932.27" y="111.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..Write..write_fmt..Adapter$LT$T$GT$$u20$as$u20$core..fmt..Write$GT$::write_str::he7fa8c2f5dae6a64 (5 samples, 0.04%)</title><rect x="139.9" y="213" width="0.5" height="15.0" fill="rgb(212,214,30)" rx="2" ry="2" />
+<text  x="142.90" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::builders::DebugStruct::field::h5d09d4f159b0149f (7 samples, 0.05%)</title><rect x="256.4" y="117" width="0.6" height="15.0" fill="rgb(245,25,11)" rx="2" ry="2" />
+<text  x="259.36" y="127.5" ></text>
+</g>
+<g >
+<title>libsystem_c.dylib`nanosleep (301 samples, 2.35%)</title><rect x="1127.5" y="245" width="27.8" height="15.0" fill="rgb(250,27,41)" rx="2" ry="2" />
+<text  x="1130.54" y="255.5" >l..</text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`mach_absolute_time (4 samples, 0.03%)</title><rect x="1126.8" y="229" width="0.4" height="15.0" fill="rgb(215,159,34)" rx="2" ry="2" />
+<text  x="1129.80" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_platform.dylib`_platform_memset (2 samples, 0.02%)</title><rect x="631.1" y="213" width="0.2" height="15.0" fill="rgb(254,76,14)" rx="2" ry="2" />
+<text  x="634.14" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`std::io::Write::write_all::h6fa931aae3128461 (2 samples, 0.02%)</title><rect x="140.5" y="181" width="0.2" height="15.0" fill="rgb(238,28,11)" rx="2" ry="2" />
+<text  x="143.55" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free_tiny (2 samples, 0.02%)</title><rect x="640.0" y="181" width="0.2" height="15.0" fill="rgb(226,218,42)" rx="2" ry="2" />
+<text  x="642.98" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_malloc_zone_realloc (60 samples, 0.47%)</title><rect x="927.0" y="149" width="5.5" height="15.0" fill="rgb(229,102,52)" rx="2" ry="2" />
+<text  x="929.97" y="159.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`medium_malloc_should_clear (4 samples, 0.03%)</title><rect x="928.9" y="101" width="0.4" height="15.0" fill="rgb(232,165,6)" rx="2" ry="2" />
+<text  x="931.90" y="111.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::base::FOV::apply::h86ed5eedc15f1720 (550 samples, 4.29%)</title><rect x="262.1" y="213" width="50.6" height="15.0" fill="rgb(214,144,14)" rx="2" ry="2" />
+<text  x="265.07" y="223.5" >rusty..</text>
+</g>
+<g >
+<title>rusty`rusty::entity::Entity::friends::h92db28e118fc5c99 (2 samples, 0.02%)</title><rect x="257.1" y="229" width="0.2" height="15.0" fill="rgb(209,180,51)" rx="2" ry="2" />
+<text  x="260.09" y="239.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::game::State::render::h653e2b5e2b670d30 (1,227 samples, 9.58%)</title><rect x="144.3" y="245" width="113.1" height="15.0" fill="rgb(215,48,30)" rx="2" ry="2" />
+<text  x="147.33" y="255.5" >rusty`rusty::..</text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free (3 samples, 0.02%)</title><rect x="260.7" y="213" width="0.3" height="15.0" fill="rgb(207,174,5)" rx="2" ry="2" />
+<text  x="263.69" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::game::update_state::hb6d6bb4d83c142ab  (9,429 samples, 73.62%)</title><rect x="257.4" y="245" width="868.7" height="15.0" fill="rgb(225,13,50)" rx="2" ry="2" />
+<text  x="260.37" y="255.5" >rusty`rusty::game::update_state::hb6d6bb4d83c142ab </text>
+</g>
+<g >
+<title>rusty`rusty::game::mapgen::_$u7b$$u7b$closure$u7d$$u7d$::hcd6516026013f10e (12 samples, 0.09%)</title><rect x="1185.5" y="277" width="1.1" height="15.0" fill="rgb(235,114,40)" rx="2" ry="2" />
+<text  x="1188.49" y="287.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve_for_push::hb5f560dde6c1941d (21 samples, 0.16%)</title><rect x="933.0" y="197" width="1.9" height="15.0" fill="rgb(222,185,25)" rx="2" ry="2" />
+<text  x="935.96" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_malloc_should_clear (8 samples, 0.06%)</title><rect x="1005.0" y="181" width="0.7" height="15.0" fill="rgb(209,69,46)" rx="2" ry="2" />
+<text  x="1008.00" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_free_list_remove_ptr (3 samples, 0.02%)</title><rect x="552.0" y="133" width="0.3" height="15.0" fill="rgb(209,148,6)" rx="2" ry="2" />
+<text  x="555.00" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`std::io::Write::write_all::h6fa931aae3128461 (6 samples, 0.05%)</title><rect x="141.9" y="149" width="0.6" height="15.0" fill="rgb(212,148,1)" rx="2" ry="2" />
+<text  x="144.93" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::main::h4f60b6280500cebb (12,771 samples, 99.71%)</title><rect x="10.0" y="309" width="1176.6" height="15.0" fill="rgb(229,214,46)" rx="2" ry="2" />
+<text  x="13.00" y="319.5" >rusty`rusty::main::h4f60b6280500cebb</text>
+</g>
+<g >
+<title>rusty`rusty::pathing::AStarHeap::heapify::h818427d48a4dbbdb (9 samples, 0.07%)</title><rect x="641.0" y="197" width="0.8" height="15.0" fill="rgb(230,149,4)" rx="2" ry="2" />
+<text  x="644.00" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::fmt::format::format_inner::h741c55afff2f5d9f (31 samples, 0.24%)</title><rect x="254.2" y="229" width="2.9" height="15.0" fill="rgb(233,184,19)" rx="2" ry="2" />
+<text  x="257.24" y="239.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::knowledge::Knowledge::remembers::hd720918248787753 (57 samples, 0.45%)</title><rect x="1120.6" y="229" width="5.3" height="15.0" fill="rgb(220,202,35)" rx="2" ry="2" />
+<text  x="1123.63" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_platform.dylib`_platform_memset (2 samples, 0.02%)</title><rect x="926.4" y="197" width="0.2" height="15.0" fill="rgb(231,172,35)" rx="2" ry="2" />
+<text  x="929.42" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_good_size (2 samples, 0.02%)</title><rect x="927.6" y="133" width="0.2" height="15.0" fill="rgb(217,70,8)" rx="2" ry="2" />
+<text  x="930.61" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`std::time::Instant::now::h572db05a71f7f89d (3 samples, 0.02%)</title><rect x="1184.9" y="277" width="0.3" height="15.0" fill="rgb(216,228,26)" rx="2" ry="2" />
+<text  x="1187.93" y="287.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`read (31 samples, 0.24%)</title><rect x="1187.0" y="325" width="2.8" height="15.0" fill="rgb(229,176,31)" rx="2" ry="2" />
+<text  x="1189.96" y="335.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$T$u20$as$u20$core..fmt..Debug$GT$::fmt::hd8e0eee4b618d74c (7 samples, 0.05%)</title><rect x="256.4" y="149" width="0.6" height="15.0" fill="rgb(231,206,22)" rx="2" ry="2" />
+<text  x="259.36" y="159.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`medium_malloc_should_clear (2 samples, 0.02%)</title><rect x="666.3" y="133" width="0.2" height="15.0" fill="rgb(219,125,40)" rx="2" ry="2" />
+<text  x="669.33" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_nanov2_free (3 samples, 0.02%)</title><rect x="637.5" y="197" width="0.3" height="15.0" fill="rgb(229,39,22)" rx="2" ry="2" />
+<text  x="640.50" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::builders::DebugStruct::field::h5d09d4f159b0149f (4 samples, 0.03%)</title><rect x="256.0" y="117" width="0.4" height="15.0" fill="rgb(232,118,50)" rx="2" ry="2" />
+<text  x="258.99" y="127.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free_tiny (3 samples, 0.02%)</title><rect x="959.9" y="165" width="0.2" height="15.0" fill="rgb(223,117,39)" rx="2" ry="2" />
+<text  x="962.86" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`std::sys_common::backtrace::__rust_begin_short_backtrace::h57536453ce34b4b2 (34 samples, 0.27%)</title><rect x="1186.9" y="341" width="3.1" height="15.0" fill="rgb(243,200,0)" rx="2" ry="2" />
+<text  x="1189.87" y="351.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::finish_grow::hb2ba598b7a4cfeae  (66 samples, 0.52%)</title><rect x="926.9" y="181" width="6.1" height="15.0" fill="rgb(229,92,21)" rx="2" ry="2" />
+<text  x="929.88" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`nanov2_realloc (6 samples, 0.05%)</title><rect x="933.5" y="133" width="0.6" height="15.0" fill="rgb(209,27,18)" rx="2" ry="2" />
+<text  x="936.51" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..Write..write_fmt..Adapter$LT$T$GT$$u20$as$u20$core..fmt..Write$GT$::write_str::he7fa8c2f5dae6a64 (2 samples, 0.02%)</title><rect x="140.5" y="197" width="0.2" height="15.0" fill="rgb(226,7,23)" rx="2" ry="2" />
+<text  x="143.55" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_malloc_from_free_list (5 samples, 0.04%)</title><rect x="551.8" y="149" width="0.5" height="15.0" fill="rgb(239,171,28)" rx="2" ry="2" />
+<text  x="554.82" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::builders::DebugStruct::field::h5d09d4f159b0149f (3 samples, 0.02%)</title><rect x="255.0" y="117" width="0.2" height="15.0" fill="rgb(212,1,46)" rx="2" ry="2" />
+<text  x="257.97" y="127.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::raw::RawTable$LT$T$C$A$GT$::reserve_rehash::ha2c5cc5c33c9f6c1  (124 samples, 0.97%)</title><rect x="983.4" y="181" width="11.4" height="15.0" fill="rgb(242,76,41)" rx="2" ry="2" />
+<text  x="986.35" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_malloc_zone_realloc (16 samples, 0.12%)</title><rect x="933.2" y="149" width="1.5" height="15.0" fill="rgb(253,28,17)" rx="2" ry="2" />
+<text  x="936.23" y="159.5" ></text>
+</g>
+<g >
+<title>libsystem_pthread.dylib`thread_start (34 samples, 0.27%)</title><rect x="1186.9" y="405" width="3.1" height="15.0" fill="rgb(241,185,5)" rx="2" ry="2" />
+<text  x="1189.87" y="415.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`nanov2_malloc (2 samples, 0.02%)</title><rect x="933.3" y="133" width="0.2" height="15.0" fill="rgb(241,11,10)" rx="2" ry="2" />
+<text  x="936.33" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`std::thread::sleep::h723257839bc706ca (625 samples, 4.88%)</title><rect x="1127.4" y="261" width="57.5" height="15.0" fill="rgb(208,97,7)" rx="2" ry="2" />
+<text  x="1130.35" y="271.5" >rusty`..</text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve::do_reserve_and_handle::h7dc23c7dc4f3c97f (5 samples, 0.04%)</title><rect x="666.1" y="181" width="0.4" height="15.0" fill="rgb(213,31,26)" rx="2" ry="2" />
+<text  x="669.06" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..stdio..StdoutLock$u20$as$u20$std..io..Write$GT$::write::h4319ab31504156d8 (3 samples, 0.02%)</title><rect x="142.2" y="101" width="0.3" height="15.0" fill="rgb(210,133,54)" rx="2" ry="2" />
+<text  x="145.21" y="111.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve_for_push::hb5f560dde6c1941d (2 samples, 0.02%)</title><rect x="639.1" y="197" width="0.1" height="15.0" fill="rgb(213,145,27)" rx="2" ry="2" />
+<text  x="642.06" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::Formatter::debug_struct_field1_finish::h46e0916a1f9a8903 (5 samples, 0.04%)</title><rect x="255.3" y="133" width="0.5" height="15.0" fill="rgb(212,160,39)" rx="2" ry="2" />
+<text  x="258.34" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_c.dylib`clock_gettime (3 samples, 0.02%)</title><rect x="11.3" y="261" width="0.3" height="15.0" fill="rgb(207,39,32)" rx="2" ry="2" />
+<text  x="14.29" y="271.5" ></text>
+</g>
+<g >
+<title>rusty`game_loop::base::GameLoop$LT$G$C$T$C$W$GT$::next_frame::h0c9134b6d286e2bd (12,747 samples, 99.52%)</title><rect x="10.6" y="277" width="1174.3" height="15.0" fill="rgb(213,223,46)" rx="2" ry="2" />
+<text  x="13.55" y="287.5" >rusty`game_loop::base::GameLoop$LT$G$C$T$C$W$GT$::next_frame::h0c9134b6d286e2bd</text>
+</g>
+<g >
+<title>rusty`core::slice::select::partition_at_index::hc6f70758d5ebd783 (338 samples, 2.64%)</title><rect x="552.5" y="197" width="31.1" height="15.0" fill="rgb(223,168,30)" rx="2" ry="2" />
+<text  x="555.46" y="207.5" >ru..</text>
+</g>
+<g >
+<title>rusty`std::sys::unix::thread::Thread::new::thread_start::hf4a34515c60a26a3 (34 samples, 0.27%)</title><rect x="1186.9" y="373" width="3.1" height="15.0" fill="rgb(236,217,42)" rx="2" ry="2" />
+<text  x="1189.87" y="383.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$alloc..string..String$u20$as$u20$core..fmt..Write$GT$::write_str::ha8a9fde62111c673 (2 samples, 0.02%)</title><rect x="254.6" y="165" width="0.2" height="15.0" fill="rgb(209,112,48)" rx="2" ry="2" />
+<text  x="257.60" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`mach_msg2_trap (282 samples, 2.20%)</title><rect x="1129.2" y="213" width="26.0" height="15.0" fill="rgb(224,211,22)" rx="2" ry="2" />
+<text  x="1132.19" y="223.5" >l..</text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`medium_malloc_from_free_list (3 samples, 0.02%)</title><rect x="929.0" y="85" width="0.3" height="15.0" fill="rgb(253,193,42)" rx="2" ry="2" />
+<text  x="932.00" y="95.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::finish_grow::hb2ba598b7a4cfeae  (20 samples, 0.16%)</title><rect x="933.0" y="181" width="1.9" height="15.0" fill="rgb(242,187,51)" rx="2" ry="2" />
+<text  x="936.05" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::finish_grow::hb2ba598b7a4cfeae  (2 samples, 0.02%)</title><rect x="631.5" y="197" width="0.2" height="15.0" fill="rgb(213,49,42)" rx="2" ry="2" />
+<text  x="634.51" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_nanov2_free (2 samples, 0.02%)</title><rect x="600.9" y="181" width="0.2" height="15.0" fill="rgb(205,118,35)" rx="2" ry="2" />
+<text  x="603.92" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::Formatter::debug_struct_field3_finish::h9db404a3e1fbaf7e (5 samples, 0.04%)</title><rect x="254.9" y="133" width="0.4" height="15.0" fill="rgb(211,174,18)" rx="2" ry="2" />
+<text  x="257.88" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`write (7 samples, 0.05%)</title><rect x="143.5" y="117" width="0.6" height="15.0" fill="rgb(210,65,29)" rx="2" ry="2" />
+<text  x="146.50" y="127.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_malloc_zone_realloc (10 samples, 0.08%)</title><rect x="660.0" y="149" width="0.9" height="15.0" fill="rgb(220,127,50)" rx="2" ry="2" />
+<text  x="662.98" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`game_loop::helper::helper::game_loop::hf3f23a25575b1591 (12,754 samples, 99.58%)</title><rect x="10.2" y="293" width="1175.0" height="15.0" fill="rgb(225,11,42)" rx="2" ry="2" />
+<text  x="13.18" y="303.5" >rusty`game_loop::helper::helper::game_loop::hf3f23a25575b1591</text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`cerror (4 samples, 0.03%)</title><rect x="1128.0" y="213" width="0.4" height="15.0" fill="rgb(234,158,33)" rx="2" ry="2" />
+<text  x="1131.00" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`rand::rngs::thread::thread_rng::h922f08b491563c4e (2 samples, 0.02%)</title><rect x="634.2" y="197" width="0.2" height="15.0" fill="rgb(220,0,2)" rx="2" ry="2" />
+<text  x="637.18" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::pathing::AStarHeap::extract_min::h8f027a0a2b4a03e3 (5 samples, 0.04%)</title><rect x="640.5" y="197" width="0.5" height="15.0" fill="rgb(249,84,26)" rx="2" ry="2" />
+<text  x="643.54" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_platform.dylib`_platform_memmove (2 samples, 0.02%)</title><rect x="660.7" y="133" width="0.2" height="15.0" fill="rgb(215,223,45)" rx="2" ry="2" />
+<text  x="663.71" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_platform.dylib`_platform_memset (2 samples, 0.02%)</title><rect x="983.2" y="181" width="0.2" height="15.0" fill="rgb(236,41,10)" rx="2" ry="2" />
+<text  x="986.17" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`nanov2_malloc (2 samples, 0.02%)</title><rect x="12.0" y="245" width="0.2" height="15.0" fill="rgb(254,222,43)" rx="2" ry="2" />
+<text  x="15.03" y="255.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..Write..write_fmt..Adapter$LT$T$GT$$u20$as$u20$core..fmt..Write$GT$::write_str::he7fa8c2f5dae6a64 (8 samples, 0.06%)</title><rect x="141.1" y="181" width="0.7" height="15.0" fill="rgb(222,59,44)" rx="2" ry="2" />
+<text  x="144.10" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::write::h3d2208eea461eb16 (52 samples, 0.41%)</title><rect x="139.5" y="229" width="4.8" height="15.0" fill="rgb(240,160,31)" rx="2" ry="2" />
+<text  x="142.53" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_c.dylib`clock_gettime (11 samples, 0.09%)</title><rect x="1126.3" y="245" width="1.1" height="15.0" fill="rgb(237,54,18)" rx="2" ry="2" />
+<text  x="1129.34" y="255.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_realloc (3 samples, 0.02%)</title><rect x="638.5" y="133" width="0.3" height="15.0" fill="rgb(215,107,52)" rx="2" ry="2" />
+<text  x="641.51" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`tiny_malloc_should_clear (3 samples, 0.02%)</title><rect x="1005.5" y="165" width="0.2" height="15.0" fill="rgb(232,112,43)" rx="2" ry="2" />
+<text  x="1008.46" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$alloc..string..String$u20$as$u20$core..fmt..Write$GT$::write_str::ha8a9fde62111c673 (2 samples, 0.02%)</title><rect x="255.8" y="117" width="0.2" height="15.0" fill="rgb(223,55,22)" rx="2" ry="2" />
+<text  x="258.80" y="127.5" ></text>
+</g>
+<g >
+<title>rusty`main (12,772 samples, 99.72%)</title><rect x="10.0" y="389" width="1176.7" height="15.0" fill="rgb(233,104,13)" rx="2" ry="2" />
+<text  x="13.00" y="399.5" >rusty`main</text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::finish_grow::hb2ba598b7a4cfeae  (14 samples, 0.11%)</title><rect x="659.8" y="181" width="1.3" height="15.0" fill="rgb(254,66,9)" rx="2" ry="2" />
+<text  x="662.79" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`core::ops::function::impls::_$LT$impl$u20$core..ops..function..FnMut$LT$A$GT$$u20$for$u20$$RF$mut$u20$F$GT$::call_mut::h411c52e99ac7ad85 (12,096 samples, 94.44%)</title><rect x="11.8" y="261" width="1114.4" height="15.0" fill="rgb(215,91,50)" rx="2" ry="2" />
+<text  x="14.84" y="271.5" >rusty`core::ops::function::impls::_$LT$impl$u20$core..ops..function..FnMut$LT$A$GT$$u20$for$u20$$RF$mut$u20$F$GT$::call_mut::h411c52e99ac7ad85</text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::flush::h564b62aa75247118 (9 samples, 0.07%)</title><rect x="138.4" y="229" width="0.9" height="15.0" fill="rgb(218,158,32)" rx="2" ry="2" />
+<text  x="141.43" y="239.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::map::HashMap$LT$K$C$V$C$S$C$A$GT$::insert::h82f4ea8235ee813c (374 samples, 2.92%)</title><rect x="960.3" y="197" width="34.5" height="15.0" fill="rgb(234,201,34)" rx="2" ry="2" />
+<text  x="963.32" y="207.5" >ru..</text>
+</g>
+<g >
+<title>rusty`core::fmt::Formatter::debug_tuple_field1_finish::hcf2ddafa2a1250b7 (28 samples, 0.22%)</title><rect x="254.4" y="181" width="2.6" height="15.0" fill="rgb(228,180,5)" rx="2" ry="2" />
+<text  x="257.42" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::pathing::AStarHeuristic::h9765b9e15ce7d610 (2 samples, 0.02%)</title><rect x="641.8" y="197" width="0.2" height="15.0" fill="rgb(214,8,48)" rx="2" ry="2" />
+<text  x="644.83" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`core::slice::memchr::memrchr::h0bbf12ea1032372c (2 samples, 0.02%)</title><rect x="140.1" y="133" width="0.2" height="15.0" fill="rgb(214,54,6)" rx="2" ry="2" />
+<text  x="143.09" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::pathing::AStarHeap::heapify::h818427d48a4dbbdb (444 samples, 3.47%)</title><rect x="1079.7" y="197" width="40.9" height="15.0" fill="rgb(244,65,35)" rx="2" ry="2" />
+<text  x="1082.72" y="207.5" >rus..</text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free_small (2 samples, 0.02%)</title><rect x="934.1" y="117" width="0.1" height="15.0" fill="rgb(208,165,38)" rx="2" ry="2" />
+<text  x="937.06" y="127.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::finish_grow::hb2ba598b7a4cfeae  (2 samples, 0.02%)</title><rect x="639.1" y="181" width="0.1" height="15.0" fill="rgb(239,88,48)" rx="2" ry="2" />
+<text  x="642.06" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::map::HashMap$LT$K$C$V$C$S$C$A$GT$::insert::h82f4ea8235ee813c (17 samples, 0.13%)</title><rect x="632.5" y="213" width="1.6" height="15.0" fill="rgb(210,156,35)" rx="2" ry="2" />
+<text  x="635.52" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free_medium (2 samples, 0.02%)</title><rect x="659.1" y="197" width="0.2" height="15.0" fill="rgb(228,191,26)" rx="2" ry="2" />
+<text  x="662.15" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$alloc..string..String$u20$as$u20$core..fmt..Write$GT$::write_str::ha8a9fde62111c673 (3 samples, 0.02%)</title><rect x="255.0" y="101" width="0.2" height="15.0" fill="rgb(225,82,5)" rx="2" ry="2" />
+<text  x="257.97" y="111.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`tiny_malloc_from_free_list (3 samples, 0.02%)</title><rect x="1005.5" y="149" width="0.2" height="15.0" fill="rgb(240,116,54)" rx="2" ry="2" />
+<text  x="1008.46" y="159.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_malloc_zone_realloc (6 samples, 0.05%)</title><rect x="638.3" y="149" width="0.6" height="15.0" fill="rgb(226,100,50)" rx="2" ry="2" />
+<text  x="641.33" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::pathing::AStar::h91638358b0f2c8db (79 samples, 0.62%)</title><rect x="634.7" y="213" width="7.3" height="15.0" fill="rgb(233,29,32)" rx="2" ry="2" />
+<text  x="637.73" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`nanov2_pointer_size (2 samples, 0.02%)</title><rect x="927.3" y="133" width="0.2" height="15.0" fill="rgb(249,183,13)" rx="2" ry="2" />
+<text  x="930.34" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..Write..write_fmt..Adapter$LT$T$GT$$u20$as$u20$core..fmt..Write$GT$::write_str::he7fa8c2f5dae6a64 (6 samples, 0.05%)</title><rect x="141.9" y="165" width="0.6" height="15.0" fill="rgb(232,93,51)" rx="2" ry="2" />
+<text  x="144.93" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`std::sys::unix::time::Timespec::now::ha372ac2cac9b15a0 (12 samples, 0.09%)</title><rect x="1126.2" y="261" width="1.2" height="15.0" fill="rgb(230,168,13)" rx="2" ry="2" />
+<text  x="1129.25" y="271.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`mach_timebase_info (2 samples, 0.02%)</title><rect x="1127.2" y="229" width="0.2" height="15.0" fill="rgb(251,61,53)" rx="2" ry="2" />
+<text  x="1130.17" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_realloc (18 samples, 0.14%)</title><rect x="933.2" y="165" width="1.7" height="15.0" fill="rgb(215,156,2)" rx="2" ry="2" />
+<text  x="936.23" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_malloc_should_clear (7 samples, 0.05%)</title><rect x="551.6" y="181" width="0.7" height="15.0" fill="rgb(247,132,6)" rx="2" ry="2" />
+<text  x="554.63" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::knowledge::Knowledge::unblocked::h217d46226c5a50f0 (3 samples, 0.02%)</title><rect x="634.5" y="213" width="0.2" height="15.0" fill="rgb(231,181,53)" rx="2" ry="2" />
+<text  x="637.46" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_realloc (2 samples, 0.02%)</title><rect x="631.5" y="181" width="0.2" height="15.0" fill="rgb(218,155,38)" rx="2" ry="2" />
+<text  x="634.51" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::knowledge::Knowledge::update::hd33a5707ac7b04bf (3,132 samples, 24.45%)</title><rect x="312.7" y="213" width="288.6" height="15.0" fill="rgb(213,6,34)" rx="2" ry="2" />
+<text  x="315.74" y="223.5" >rusty`rusty::knowledge::Knowledge::upd..</text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$T$u20$as$u20$core..fmt..Debug$GT$::fmt::hd8a3afdfe40ebd9e (6 samples, 0.05%)</title><rect x="255.8" y="149" width="0.6" height="15.0" fill="rgb(248,85,15)" rx="2" ry="2" />
+<text  x="258.80" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::pathing::AStarHeap::extract_min::h8f027a0a2b4a03e3 (803 samples, 6.27%)</title><rect x="1005.7" y="197" width="74.0" height="15.0" fill="rgb(222,184,5)" rx="2" ry="2" />
+<text  x="1008.74" y="207.5" >rusty`ru..</text>
+</g>
+<g >
+<title>rusty`std::rt::lang_start_internal::hf4da51c0b5617a0f (12,772 samples, 99.72%)</title><rect x="10.0" y="357" width="1176.7" height="15.0" fill="rgb(234,98,12)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" >rusty`std::rt::lang_start_internal::hf4da51c0b5617a0f</text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`write (2 samples, 0.02%)</title><rect x="142.2" y="69" width="0.2" height="15.0" fill="rgb(226,41,17)" rx="2" ry="2" />
+<text  x="145.21" y="79.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::raw::RawTable$LT$T$C$A$GT$::reserve_rehash::ha2c5cc5c33c9f6c1  (119 samples, 0.93%)</title><rect x="994.8" y="197" width="10.9" height="15.0" fill="rgb(218,127,9)" rx="2" ry="2" />
+<text  x="997.78" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::finish_grow::h350a6a5544809d42 (2 samples, 0.02%)</title><rect x="255.1" y="69" width="0.1" height="15.0" fill="rgb(228,76,26)" rx="2" ry="2" />
+<text  x="258.07" y="79.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve_for_push::h99cfb640c6925cf5 (17 samples, 0.13%)</title><rect x="659.5" y="197" width="1.6" height="15.0" fill="rgb(254,115,18)" rx="2" ry="2" />
+<text  x="662.52" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_size (2 samples, 0.02%)</title><rect x="932.6" y="149" width="0.2" height="15.0" fill="rgb(208,15,21)" rx="2" ry="2" />
+<text  x="935.59" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$alloc..vec..spec_from_iter..SpecFromIter$LT$T$C$I$GT$$GT$::from_iter::h0879d4e0f5fb87ff (932 samples, 7.28%)</title><rect x="466.4" y="197" width="85.9" height="15.0" fill="rgb(212,117,31)" rx="2" ry="2" />
+<text  x="469.41" y="207.5" >rusty`_$LT..</text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_size (2 samples, 0.02%)</title><rect x="929.6" y="117" width="0.2" height="15.0" fill="rgb(241,211,23)" rx="2" ry="2" />
+<text  x="932.64" y="127.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::entity::Entity::friends::h92db28e118fc5c99 (5 samples, 0.04%)</title><rect x="598.6" y="197" width="0.5" height="15.0" fill="rgb(254,77,13)" rx="2" ry="2" />
+<text  x="601.62" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$alloc..string..String$u20$as$u20$core..fmt..Write$GT$::write_str::ha8a9fde62111c673 (6 samples, 0.05%)</title><rect x="256.4" y="101" width="0.6" height="15.0" fill="rgb(233,18,38)" rx="2" ry="2" />
+<text  x="259.45" y="111.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_realloc (23 samples, 0.18%)</title><rect x="927.8" y="133" width="2.1" height="15.0" fill="rgb(236,178,19)" rx="2" ry="2" />
+<text  x="930.80" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free_small (6 samples, 0.05%)</title><rect x="465.7" y="197" width="0.5" height="15.0" fill="rgb(247,117,32)" rx="2" ry="2" />
+<text  x="468.67" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::game::plan_wild_pokemon::hf32746751a1ef4b6 (5,637 samples, 44.01%)</title><rect x="601.3" y="229" width="519.3" height="15.0" fill="rgb(213,25,40)" rx="2" ry="2" />
+<text  x="604.29" y="239.5" >rusty`rusty::game::plan_wild_pokemon::hf32746751a1ef4b6</text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`nanov2_realloc (2 samples, 0.02%)</title><rect x="638.3" y="133" width="0.2" height="15.0" fill="rgb(218,217,11)" rx="2" ry="2" />
+<text  x="641.33" y="143.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free_small (5 samples, 0.04%)</title><rect x="928.2" y="117" width="0.4" height="15.0" fill="rgb(218,136,4)" rx="2" ry="2" />
+<text  x="931.17" y="127.5" ></text>
+</g>
+<g >
+<title>dyld`start (12,772 samples, 99.72%)</title><rect x="10.0" y="405" width="1176.7" height="15.0" fill="rgb(252,160,37)" rx="2" ry="2" />
+<text  x="13.00" y="415.5" >dyld`start</text>
+</g>
+<g >
+<title>rusty`std::sys_common::backtrace::__rust_begin_short_backtrace::h259d6b3acbf56a01 (12,771 samples, 99.71%)</title><rect x="10.0" y="325" width="1176.6" height="15.0" fill="rgb(220,179,42)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" >rusty`std::sys_common::backtrace::__rust_begin_short_backtrace::h259d6b3acbf56a01</text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::finish_grow::h350a6a5544809d42 (4 samples, 0.03%)</title><rect x="256.6" y="69" width="0.4" height="15.0" fill="rgb(251,91,44)" rx="2" ry="2" />
+<text  x="259.63" y="79.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::map::HashMap$LT$K$C$V$C$S$C$A$GT$::insert::h2c0749093e96f9a0 (8 samples, 0.06%)</title><rect x="261.1" y="213" width="0.8" height="15.0" fill="rgb(246,139,34)" rx="2" ry="2" />
+<text  x="264.15" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::base::Matrix$LT$T$GT$::new::hd19b4fb9bd2f7d44 (59 samples, 0.46%)</title><rect x="661.1" y="197" width="5.4" height="15.0" fill="rgb(222,115,4)" rx="2" ry="2" />
+<text  x="664.08" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_malloc_should_clear (3 samples, 0.02%)</title><rect x="660.3" y="117" width="0.2" height="15.0" fill="rgb(239,168,14)" rx="2" ry="2" />
+<text  x="663.25" y="127.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free_tiny (3 samples, 0.02%)</title><rect x="637.8" y="197" width="0.2" height="15.0" fill="rgb(229,153,54)" rx="2" ry="2" />
+<text  x="640.77" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`core::slice::sort::partition::h8dc84906976173d0 (322 samples, 2.51%)</title><rect x="553.9" y="181" width="29.7" height="15.0" fill="rgb(220,191,12)" rx="2" ry="2" />
+<text  x="556.94" y="191.5" >ru..</text>
+</g>
+<g >
+<title>rusty`core::fmt::write::h3d2208eea461eb16 (18 samples, 0.14%)</title><rect x="141.0" y="197" width="1.7" height="15.0" fill="rgb(236,205,33)" rx="2" ry="2" />
+<text  x="144.01" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::hd2fc2bc39e482d60 (5 samples, 0.04%)</title><rect x="142.0" y="117" width="0.5" height="15.0" fill="rgb(236,101,40)" rx="2" ry="2" />
+<text  x="145.02" y="127.5" ></text>
+</g>
+<g >
+<title>rusty`std::io::buffered::bufwriter::BufWriter$LT$W$GT$::write_cold::hf75608a8c49042ec (8 samples, 0.06%)</title><rect x="143.5" y="133" width="0.7" height="15.0" fill="rgb(242,204,0)" rx="2" ry="2" />
+<text  x="146.50" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::map::HashMap$LT$K$C$V$C$S$C$A$GT$::insert::h525c20194c41def9 (7 samples, 0.05%)</title><rect x="631.9" y="213" width="0.6" height="15.0" fill="rgb(232,129,18)" rx="2" ry="2" />
+<text  x="634.88" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::h4685264c199fcbe5 (2 samples, 0.02%)</title><rect x="140.5" y="165" width="0.2" height="15.0" fill="rgb(229,1,35)" rx="2" ry="2" />
+<text  x="143.55" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`std::rt::lang_start::h70d9723d146a6268 (12,772 samples, 99.72%)</title><rect x="10.0" y="373" width="1176.7" height="15.0" fill="rgb(240,79,37)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" >rusty`std::rt::lang_start::h70d9723d146a6268</text>
+</g>
+<g >
+<title>rusty`rusty::pathing::DijkstraMap::h7e860e975dbdbd39 (4,903 samples, 38.28%)</title><rect x="668.9" y="213" width="451.7" height="15.0" fill="rgb(233,27,26)" rx="2" ry="2" />
+<text  x="671.91" y="223.5" >rusty`rusty::pathing::DijkstraMap::h7e860e975dbdbd39</text>
+</g>
+<g >
+<title>rusty`rusty::Screen::render::h3ce60a7597da8ceb (1,428 samples, 11.15%)</title><rect x="12.8" y="245" width="131.5" height="15.0" fill="rgb(223,71,3)" rx="2" ry="2" />
+<text  x="15.76" y="255.5" >rusty`rusty::Scr..</text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`free (5 samples, 0.04%)</title><rect x="258.5" y="229" width="0.4" height="15.0" fill="rgb(215,7,19)" rx="2" ry="2" />
+<text  x="261.47" y="239.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_malloc_from_free_list (3 samples, 0.02%)</title><rect x="929.3" y="85" width="0.2" height="15.0" fill="rgb(242,167,31)" rx="2" ry="2" />
+<text  x="932.27" y="95.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve::do_reserve_and_handle::hc61a8403329a1c8c (3 samples, 0.02%)</title><rect x="255.0" y="85" width="0.2" height="15.0" fill="rgb(209,96,0)" rx="2" ry="2" />
+<text  x="257.97" y="95.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve::do_reserve_and_handle::hc61a8403329a1c8c (2 samples, 0.02%)</title><rect x="254.6" y="149" width="0.2" height="15.0" fill="rgb(213,155,27)" rx="2" ry="2" />
+<text  x="257.60" y="159.5" ></text>
+</g>
+<g >
+<title>rusty`std::io::buffered::bufwriter::BufWriter$LT$W$GT$::write_cold::hf75608a8c49042ec (3 samples, 0.02%)</title><rect x="142.2" y="85" width="0.3" height="15.0" fill="rgb(216,142,29)" rx="2" ry="2" />
+<text  x="145.21" y="95.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::raw::RawTable$LT$T$C$A$GT$::reserve_rehash::ha2c5cc5c33c9f6c1  (9 samples, 0.07%)</title><rect x="639.4" y="197" width="0.9" height="15.0" fill="rgb(254,180,30)" rx="2" ry="2" />
+<text  x="642.43" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`small_malloc_should_clear (4 samples, 0.03%)</title><rect x="1005.1" y="165" width="0.4" height="15.0" fill="rgb(213,142,1)" rx="2" ry="2" />
+<text  x="1008.10" y="175.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_malloc_should_clear (2 samples, 0.02%)</title><rect x="638.6" y="117" width="0.2" height="15.0" fill="rgb(217,155,39)" rx="2" ry="2" />
+<text  x="641.60" y="127.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::knowledge::Knowledge::update_entity::ha562c123f3200b30 (24 samples, 0.19%)</title><rect x="599.1" y="197" width="2.2" height="15.0" fill="rgb(209,135,18)" rx="2" ry="2" />
+<text  x="602.08" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::map::HashMap$LT$K$C$V$C$S$C$A$GT$::insert::h525c20194c41def9 (275 samples, 2.15%)</title><rect x="935.0" y="197" width="25.3" height="15.0" fill="rgb(218,199,4)" rx="2" ry="2" />
+<text  x="937.98" y="207.5" >r..</text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_realloc (4 samples, 0.03%)</title><rect x="934.1" y="133" width="0.3" height="15.0" fill="rgb(208,174,3)" rx="2" ry="2" />
+<text  x="937.06" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::map::HashMap$LT$K$C$V$C$S$C$A$GT$::remove::h8847104900ab3196 (3 samples, 0.02%)</title><rect x="12.5" y="245" width="0.3" height="15.0" fill="rgb(230,188,11)" rx="2" ry="2" />
+<text  x="15.49" y="255.5" ></text>
+</g>
+<g >
+<title>rusty`std::rt::lang_start::_$u7b$$u7b$closure$u7d$$u7d$::ha8ff84eaf5a7dc1a (12,771 samples, 99.71%)</title><rect x="10.0" y="341" width="1176.6" height="15.0" fill="rgb(208,121,45)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" >rusty`std::rt::lang_start::_$u7b$$u7b$closure$u7d$$u7d$::ha8ff84eaf5a7dc1a</text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$T$u20$as$u20$core..fmt..Debug$GT$::fmt::he3f552dde89de138 (2 samples, 0.02%)</title><rect x="256.1" y="101" width="0.2" height="15.0" fill="rgb(217,18,50)" rx="2" ry="2" />
+<text  x="259.08" y="111.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::Write::write_char::h4c283b2c67c7ddc8 (17 samples, 0.13%)</title><rect x="142.7" y="213" width="1.5" height="15.0" fill="rgb(243,225,9)" rx="2" ry="2" />
+<text  x="145.67" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::base::sample::ha2ae9c4f539eff2a (3 samples, 0.02%)</title><rect x="634.1" y="213" width="0.3" height="15.0" fill="rgb(243,30,42)" rx="2" ry="2" />
+<text  x="637.09" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::RawVec$LT$T$C$A$GT$::reserve::do_reserve_and_handle::hc61a8403329a1c8c (5 samples, 0.04%)</title><rect x="256.5" y="85" width="0.5" height="15.0" fill="rgb(254,22,27)" rx="2" ry="2" />
+<text  x="259.54" y="95.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_nanov2_free (5 samples, 0.04%)</title><rect x="465.1" y="197" width="0.5" height="15.0" fill="rgb(242,192,22)" rx="2" ry="2" />
+<text  x="468.12" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::h4685264c199fcbe5 (6 samples, 0.05%)</title><rect x="141.9" y="133" width="0.6" height="15.0" fill="rgb(246,110,46)" rx="2" ry="2" />
+<text  x="144.93" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::finish_grow::hb2ba598b7a4cfeae  (9 samples, 0.07%)</title><rect x="638.1" y="181" width="0.9" height="15.0" fill="rgb(234,227,23)" rx="2" ry="2" />
+<text  x="641.14" y="191.5" ></text>
+</g>
+<g >
+<title>rusty`hashbrown::raw::RawTable$LT$T$C$A$GT$::reserve_rehash::h6bff4f4385c69145  (13 samples, 0.10%)</title><rect x="597.4" y="181" width="1.2" height="15.0" fill="rgb(236,96,36)" rx="2" ry="2" />
+<text  x="600.42" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`nanov2_malloc (5 samples, 0.04%)</title><rect x="630.6" y="213" width="0.4" height="15.0" fill="rgb(220,174,32)" rx="2" ry="2" />
+<text  x="633.59" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::game::explore_near::_$u7b$$u7b$closure$u7d$$u7d$::h70fb5c9a93f42690 (24 samples, 0.19%)</title><rect x="666.5" y="197" width="2.2" height="15.0" fill="rgb(224,76,17)" rx="2" ry="2" />
+<text  x="669.52" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$alloc..boxed..Box$LT$T$C$A$GT$$u20$as$u20$core..fmt..Debug$GT$::fmt::hceb9546e6adf0c31 (30 samples, 0.23%)</title><rect x="254.2" y="197" width="2.8" height="15.0" fill="rgb(218,112,28)" rx="2" ry="2" />
+<text  x="257.24" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`std::io::Write::write_all::h6fa931aae3128461 (8 samples, 0.06%)</title><rect x="141.1" y="165" width="0.7" height="15.0" fill="rgb(249,77,54)" rx="2" ry="2" />
+<text  x="144.10" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::pathing::AStarHeap::heapify::h818427d48a4dbbdb (7 samples, 0.05%)</title><rect x="642.0" y="213" width="0.7" height="15.0" fill="rgb(229,220,0)" rx="2" ry="2" />
+<text  x="645.01" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::write::h3d2208eea461eb16 (31 samples, 0.24%)</title><rect x="254.2" y="213" width="2.9" height="15.0" fill="rgb(229,22,35)" rx="2" ry="2" />
+<text  x="257.24" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_platform.dylib`_platform_memmove (3 samples, 0.02%)</title><rect x="934.4" y="133" width="0.3" height="15.0" fill="rgb(210,188,16)" rx="2" ry="2" />
+<text  x="937.43" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`core::ops::function::FnOnce::call_once$u7b$$u7b$vtable.shim$u7d$$u7d$::h054c6c961184a63b (34 samples, 0.27%)</title><rect x="1186.9" y="357" width="3.1" height="15.0" fill="rgb(236,117,3)" rx="2" ry="2" />
+<text  x="1189.87" y="367.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::h4685264c199fcbe5 (3 samples, 0.02%)</title><rect x="140.1" y="181" width="0.3" height="15.0" fill="rgb(228,67,27)" rx="2" ry="2" />
+<text  x="143.09" y="191.5" ></text>
+</g>
+<g >
+<title>libsystem_kernel.dylib`__exit (2 samples, 0.02%)</title><rect x="1186.7" y="405" width="0.2" height="15.0" fill="rgb(221,104,0)" rx="2" ry="2" />
+<text  x="1189.68" y="415.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`szone_malloc_should_clear (10 samples, 0.08%)</title><rect x="928.7" y="117" width="0.9" height="15.0" fill="rgb(237,227,5)" rx="2" ry="2" />
+<text  x="931.72" y="127.5" ></text>
+</g>
+<g >
+<title>rusty`core::fmt::Formatter::debug_struct_field3_finish::h9db404a3e1fbaf7e (6 samples, 0.05%)</title><rect x="255.8" y="133" width="0.6" height="15.0" fill="rgb(209,3,33)" rx="2" ry="2" />
+<text  x="258.80" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::h4685264c199fcbe5 (6 samples, 0.05%)</title><rect x="141.3" y="149" width="0.5" height="15.0" fill="rgb(234,20,45)" rx="2" ry="2" />
+<text  x="144.29" y="159.5" ></text>
+</g>
+<g >
+<title>libsystem_platform.dylib`_platform_memset (12 samples, 0.09%)</title><rect x="259.1" y="229" width="1.1" height="15.0" fill="rgb(232,38,22)" rx="2" ry="2" />
+<text  x="262.12" y="239.5" ></text>
+</g>
+<g >
+<title>rusty`core::slice::sort::choose_pivot::h4d8980f558be2933 (3 samples, 0.02%)</title><rect x="583.6" y="197" width="0.3" height="15.0" fill="rgb(251,141,26)" rx="2" ry="2" />
+<text  x="586.60" y="207.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_malloc_zone_realloc (4 samples, 0.03%)</title><rect x="256.6" y="37" width="0.4" height="15.0" fill="rgb(249,23,50)" rx="2" ry="2" />
+<text  x="259.63" y="47.5" ></text>
+</g>
+<g >
+<title>rusty`std::io::Write::write_all::h6fa931aae3128461 (15 samples, 0.12%)</title><rect x="142.9" y="197" width="1.3" height="15.0" fill="rgb(226,156,49)" rx="2" ry="2" />
+<text  x="145.85" y="207.5" ></text>
+</g>
+<g >
+<title>rusty`alloc::raw_vec::finish_grow::hb2ba598b7a4cfeae  (3 samples, 0.02%)</title><rect x="666.2" y="165" width="0.3" height="15.0" fill="rgb(228,130,31)" rx="2" ry="2" />
+<text  x="669.24" y="175.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::write::hd2fc2bc39e482d60 (3 samples, 0.02%)</title><rect x="141.5" y="133" width="0.2" height="15.0" fill="rgb(226,215,45)" rx="2" ry="2" />
+<text  x="144.47" y="143.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$termion..cursor..Goto$u20$as$u20$core..fmt..Display$GT$::fmt::h2ecd358a99a57f37 (19 samples, 0.15%)</title><rect x="140.9" y="213" width="1.8" height="15.0" fill="rgb(224,192,9)" rx="2" ry="2" />
+<text  x="143.92" y="223.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_realloc (2 samples, 0.02%)</title><rect x="255.1" y="53" width="0.1" height="15.0" fill="rgb(250,187,6)" rx="2" ry="2" />
+<text  x="258.07" y="63.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_nanov2_free (4 samples, 0.03%)</title><rect x="933.5" y="117" width="0.4" height="15.0" fill="rgb(206,102,30)" rx="2" ry="2" />
+<text  x="936.51" y="127.5" ></text>
+</g>
+<g >
+<title>rusty`_$LT$$RF$std..io..stdio..Stdout$u20$as$u20$std..io..Write$GT$::flush::h267baed63548eee2 (9 samples, 0.07%)</title><rect x="138.4" y="213" width="0.9" height="15.0" fill="rgb(226,6,53)" rx="2" ry="2" />
+<text  x="141.43" y="223.5" ></text>
+</g>
+<g >
+<title>rusty`rusty::game::Board::update_known::h260fd0228780cf0f (3,700 samples, 28.89%)</title><rect x="260.4" y="229" width="340.9" height="15.0" fill="rgb(230,163,34)" rx="2" ry="2" />
+<text  x="263.41" y="239.5" >rusty`rusty::game::Board::update_known::h260fd..</text>
+</g>
+<g >
+<title>rusty`_$LT$alloc..string..String$u20$as$u20$core..fmt..Write$GT$::write_str::ha8a9fde62111c673 (2 samples, 0.02%)</title><rect x="255.5" y="117" width="0.2" height="15.0" fill="rgb(213,166,7)" rx="2" ry="2" />
+<text  x="258.53" y="127.5" ></text>
+</g>
+<g >
+<title>libsystem_malloc.dylib`_realloc (11 samples, 0.09%)</title><rect x="659.9" y="165" width="1.0" height="15.0" fill="rgb(236,19,49)" rx="2" ry="2" />
+<text  x="662.88" y="175.5" ></text>
+</g>
+</g>
+</svg>

@@ -655,7 +655,7 @@ pub struct Fight {
 pub struct Flight {
     age: i32,
     switch: i32,
-    target: Point,
+    target: Vec<Point>,
 }
 
 #[derive(Debug)]
@@ -746,9 +746,9 @@ fn assess(entity: &Entity, state: &mut Assess) -> Action {
     Action::Look(Point(rx as i32, ry as i32))
 }
 
-fn flight(entity: &Entity, source: Point) -> Option<Action> {
+fn flight(entity: &Entity, sources: &Vec<Point>) -> Option<Action> {
     let mut map: HashMap<Point, i32> = HashMap::default();
-    map.insert(source, 0);
+    for source in sources { map.insert(*source, 0); }
 
     let limit = 1024;
     let (known, pos) = (&*entity.known, entity.pos);
@@ -788,15 +788,12 @@ fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
     let mut ai = pokemon.data.ai.take().unwrap_or(Box::default());
     let prey = pokemon.data.me.species.name == "Pidgey";
 
-    let mut targets: Vec<(i32, Point)> = vec![];
-    for entity in pokemon.known.entities.iter() {
-        if !entity.rival { continue; }
-        targets.push((entity.age, entity.pos));
-    }
+    let mut targets = pokemon.known.entities.iter().filter(
+        |x| x.rival).collect::<Vec<_>>();
 
     if !targets.is_empty() {
-        targets.sort_by_cached_key(|(age, _)| *age);
-        let (age, target) = targets[0];
+        targets.sort_unstable_by_key(|x| x.age);
+        let EntityKnowledge { age, pos: target, .. } = *targets[0];
 
         if prey {
             let switch = match ai.as_ref() {
@@ -809,10 +806,13 @@ fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
                 *ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME });
             } else if age < switch && !flight {
                 let switch = clamp(2 * switch, MIN_FLIGHT_TIME, MAX_FLIGHT_TIME);
-                *ai = AIState::Flight(Flight { age, switch, target });
+                *ai = AIState::Flight(Flight { age, switch, target: vec![] });
             }
             if let AIState::Flight(x) = ai.as_mut() {
+                let target = targets.into_iter().filter_map(
+                    |x| if x.age < switch { Some(x.pos) } else { None }).collect();
                 (x.age, x.target) = (age, target);
+                assert!(!x.target.is_empty());
             }
         } else if age < MAX_FOLLOW_TIME || matches!(*ai, AIState::Fight(_)) {
             *ai = AIState::Fight(Fight { age, target });
@@ -845,8 +845,8 @@ fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
         } else {
             explore_near(pokemon, x.target, x.age, 1.)
         }
-        AIState::Flight(x) => flight(pokemon, x.target).unwrap_or_else(||{
-            let (target, time) = (x.target, ASSESS_TIME);
+        AIState::Flight(x) => flight(pokemon, &x.target).unwrap_or_else(||{
+            let (target, time) = (x.target[0], ASSESS_TIME);
             let mut x = Assess { switch: min(x.age + 1, x.switch), target, time };
             let result = assess(pokemon, &mut x);
             replacement = Some(AIState::Assess(x));
