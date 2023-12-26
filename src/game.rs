@@ -759,11 +759,13 @@ fn flight(entity: &Entity, sources: &Vec<Point>) -> Option<Action> {
     };
     DijkstraMap(DijkstraMode::Expand(limit), check, 1, &mut map);
 
-    for (pos, val) in map.iter_mut() {
-        let frontier = dirs::ALL.iter().any(|x| !known.get(*pos + *x).was_visible());
-        if frontier { *val += FOV_RADIUS_NPC; }
-        *val *= -10;
-    }
+    let frontier: Vec<_> = map.keys().filter_map(|x| {
+        let okay = dirs::ALL.iter().any(|y| !map.contains_key(&(*x + *y)));
+        if okay { Some(*x) } else { None }
+    }).collect();
+    for pos in &frontier { *map.get_mut(&pos).unwrap() += FOV_RADIUS_NPC }
+    for val in map.values_mut() { *val *= -10; }
+
     DijkstraMap(DijkstraMode::Update, check, 1, &mut map);
 
     let lookup = |x: &Point| map.get(x).map(|x| *x).unwrap_or(-9999);

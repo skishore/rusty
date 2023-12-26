@@ -246,10 +246,6 @@ impl<'a> CellResult<'a> {
     pub fn visible(&self) -> bool {
         self.cell.map(|x| x.age == 0).unwrap_or(false)
     }
-
-    pub fn was_visible(&self) -> bool {
-        self.cell.is_some()
-    }
 }
 
 impl Knowledge {
