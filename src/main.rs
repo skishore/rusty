@@ -6,6 +6,7 @@ mod game;
 mod effect;
 mod entity;
 mod knowledge;
+mod list;
 mod pathing;
 
 use std::io::{self, Write};
