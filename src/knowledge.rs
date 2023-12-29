@@ -7,6 +7,7 @@ use crate::base::{FOV, Glyph, HashMap, Matrix, Point, clamp};
 use crate::entity::{EID, Entity, PokemonEdge};
 use crate::entity::{PokemonIndividualData, PokemonSpeciesData};
 use crate::game::{BoardView, Tile, MOVE_TIMER};
+use crate::list::{Handle, List};
 use crate::pathing::Status;
 
 //////////////////////////////////////////////////////////////////////////////
@@ -172,12 +173,13 @@ pub fn get_view(entity: &Entity, view: &BoardView) -> EntityView {
 #[derive(Clone, Copy, Eq, PartialEq)] pub struct EntityIndex(i32);
 
 pub struct CellKnowledge {
+    since: u32,
+    point: Point,
     index: Option<EntityIndex>,
-    pub age: i32,
     pub tile: &'static Tile,
     pub visibility: i32,
 }
-static_assert_size!(CellKnowledge, 24);
+static_assert_size!(CellKnowledge, 32);
 
 pub struct EntityKnowledge {
     pub eid: EID,
@@ -194,7 +196,9 @@ pub struct EntityKnowledge {
 
 #[derive(Default)]
 pub struct Knowledge {
-    map: HashMap<Point, CellKnowledge>,
+    since: u32,
+    cells: List<CellKnowledge>,
+    map: HashMap<Point, Handle<CellKnowledge>>,
     entity_by_id: HashMap<EID, EntityIndex>,
     pub entities: Vec<EntityKnowledge>,
     pub focus: Option<EID>,
@@ -209,7 +213,7 @@ impl<'a> CellResult<'a> {
     // Field lookups
 
     pub fn age(&self) -> i32 {
-        self.cell.map(|x| x.age).unwrap_or(std::i32::MAX)
+        self.cell.map(|x| (self.root.since - x.since) as i32).unwrap_or(std::i32::MAX)
     }
 
     pub fn tile(&self) -> Option<&'static Tile> {
@@ -244,7 +248,7 @@ impl<'a> CellResult<'a> {
     }
 
     pub fn visible(&self) -> bool {
-        self.cell.map(|x| x.age == 0).unwrap_or(false)
+        self.cell.map(|x| self.root.since == x.since).unwrap_or(false)
     }
 }
 
@@ -260,13 +264,14 @@ impl Knowledge {
     }
 
     pub fn get(&self, p: Point) -> CellResult {
-        CellResult { root: self, cell: self.map.get(&p) }
+        CellResult { root: self, cell: self.map.get(&p).map(|x| &self.cells[*x]) }
     }
 
     // Writes
 
     pub fn update(&mut self, me: &Entity, view: &BoardView, vision: &Vision) {
         self.age_out(me.player);
+        let since = self.since;
 
         // Entities have approximate knowledge about friends, even if unseen.
         for eid in me.friends() {
@@ -277,20 +282,29 @@ impl Knowledge {
 
         // Entities have exact knowledge about anything they can see.
         for point in &vision.points_seen {
-            let visibility = vision.get_visibility_at(*point);
+            let point = *point;
+            let visibility = vision.get_visibility_at(point);
             assert!(visibility >= 0);
 
             let index = (|| {
-                let other = view.get_entity(view.get_entity_at(*point)?)?;
+                let other = view.get_entity(view.get_entity_at(point)?)?;
                 Some(self.update_entity(me, view, other, true))
             })();
 
-            let tile = view.get_tile_at(*point);
-            let cell = CellKnowledge { age: 0, index, tile, visibility };
-            let prev = self.map.insert(*point, cell);
-            if let Some(x) = prev && x.index != index && let Some(other) = x.index {
-                self.mark_entity_moved(other, *point);
-            }
+            let mut prev_index = None;
+            let tile = view.get_tile_at(point);
+            self.map.entry(point).and_modify(|x| {
+                self.cells.move_to_front(*x);
+                let cell = CellKnowledge { since, point, index, tile, visibility };
+                prev_index = std::mem::replace(&mut self.cells[*x], cell).index;
+            }).or_insert_with(|| {
+                let cell = CellKnowledge { since, point, index, tile, visibility };
+                self.cells.push_front(cell)
+            });
+
+            if prev_index != index && let Some(other) = prev_index {
+                self.mark_entity_moved(other, point);
+            };
         }
 
         self.forget(me.player);
@@ -303,7 +317,7 @@ impl Knowledge {
         let index = *self.entity_by_id.entry(other.id()).and_modify(|x| {
             let existing = &mut self.entities[x.0 as usize];
             if !existing.moved && !(seen && existing.pos == other.pos) {
-                let cell = self.map.get_mut(&existing.pos).unwrap();
+                let cell = &mut self.cells[*self.map.get(&existing.pos).unwrap()];
                 assert!(cell.index == Some(*x));
                 cell.index = None;
             };
@@ -348,37 +362,27 @@ impl Knowledge {
         &mut self.entities[index.0 as usize]
     }
 
-    fn age_out(&mut self, player: bool) {
-        if player {
-            self.map.iter_mut().for_each(|x| x.1.age = 1);
-            self.entities.iter_mut().for_each(|x| x.age = 1);
-            return;
-        }
-
-        for x in self.map.values_mut() { x.age += 1; }
+    fn age_out(&mut self, _player: bool) {
         for x in &mut self.entities { x.age += 1; }
+        self.since += 1;
     }
 
     fn forget(&mut self, player: bool) {
         if player { return; }
+
+        while self.map.len() > MAX_TILE_MEMORY {
+            // We don't need to check age, here; we can only see a bounded
+            // number of cells per turn, much less than MAX_TILE_MEMORY.
+            let CellKnowledge { point, index, .. } = self.cells.pop_back().unwrap();
+            if let Some(x) = index { self.mark_entity_moved(x, point); }
+            self.map.remove(&point);
+        }
 
         let age_to_forget = |mut ages: Vec<i32>, limit: usize| -> Option<i32> {
             assert!(limit > 0);
             if ages.len() < limit as usize { return None; }
             Some(*ages.select_nth_unstable(limit - 1).1 + 1)
         };
-
-        let ages = self.map.values().map(|x| x.age).collect();
-        if let Some(age) = age_to_forget(ages, MAX_TILE_MEMORY) {
-            let mut removed: Vec<(Point, Option<EntityIndex>)> = vec![];
-            for (key, val) in self.map.iter_mut() {
-                if val.age >= age { removed.push((*key, val.index)); }
-            }
-            for (key, eid) in &removed {
-                self.map.remove(key);
-                if let Some(x) = eid { self.mark_entity_moved(*x, *key); }
-            }
-        }
 
         let ages = self.entities.iter().map(|x| x.age).collect();
         if let Some(age) = age_to_forget(ages, MAX_ENTITY_MEMORY) {
@@ -406,13 +410,13 @@ impl Knowledge {
         let swap = index != popped_index;
 
         if !popped.moved {
-            let cell = self.map.get_mut(&popped.pos).unwrap();
+            let cell = &mut self.cells[*self.map.get_mut(&popped.pos).unwrap()];
             assert!(cell.index == Some(popped_index));
             cell.index = if swap { Some(index) } else { None };
         }
 
         if swap && !moved {
-            let cell = self.map.get_mut(&pos).unwrap();
+            let cell = &mut self.cells[*self.map.get_mut(&pos).unwrap()];
             assert!(cell.index == Some(index));
             cell.index = None;
         }
