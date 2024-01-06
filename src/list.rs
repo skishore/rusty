@@ -71,7 +71,7 @@ impl<T> std::ops::Index<Handle<T>> for List<T> {
     type Output = T;
     fn index(&self, h: Handle<T>) -> &Self::Output {
         let node = self.node(h);
-        assert!(node.link.next.0 & 1 == 0);
+        assert!(node.link.next.is_used());
         unsafe { node.data.assume_init_ref() }
     }
 }
@@ -79,17 +79,12 @@ impl<T> std::ops::Index<Handle<T>> for List<T> {
 impl<T> std::ops::IndexMut<Handle<T>> for List<T> {
     fn index_mut(&mut self, h: Handle<T>) -> &mut Self::Output {
         let node = self.node_mut(h);
-        assert!(node.link.next.0 & 1 == 0);
+        assert!(node.link.next.is_used());
         unsafe { node.data.assume_init_mut() }
     }
 }
 
 impl<T> Handle<T> {
-    fn checked(x: Index) -> Self {
-        debug_assert!(!x.is_dummy());
-        Self(NonZeroU32::new(x.0).unwrap(), PhantomData)
-    }
-
     unsafe fn unchecked(x: Index) -> Self {
         debug_assert!(!x.is_dummy());
         Self(NonZeroU32::new_unchecked(x.0), PhantomData)
@@ -208,6 +203,34 @@ impl<T> List<T> {
         IterMut { list: self, link: Link { prev: Index(0), next: Index(0) } }
     }
 
+    pub fn move_to_back(&mut self, h: Handle<T>) {
+        let node = self.node_mut(h);
+        assert!(node.link.next.is_used());
+
+        let Link { prev, next } = node.link;
+        self.link_mut(prev).next = next;
+        self.link_mut(next).prev = prev;
+
+        let tail = self.heads[0].prev;
+        self.node_mut(h).link = Link { prev: tail, next: Index(0) };
+        self.link_mut(tail).next = h.index();
+        self.heads[0].prev = h.index();
+    }
+
+    pub fn move_to_front(&mut self, h: Handle<T>) {
+        let node = self.node_mut(h);
+        assert!(node.link.next.is_used());
+
+        let Link { prev, next } = node.link;
+        self.link_mut(prev).next = next;
+        self.link_mut(next).prev = prev;
+
+        let head = self.heads[0].next;
+        self.node_mut(h).link = Link { prev: Index(0), next: head };
+        self.link_mut(head).prev = h.index();
+        self.heads[0].next = h.index();
+    }
+
     pub fn pop_back(&mut self) -> Option<T> {
         if self.is_empty() { return None; }
         let tail = unsafe { Handle::unchecked(self.heads[0].prev) };
@@ -254,7 +277,7 @@ impl<T> List<T> {
 
     pub fn remove(&mut self, h: Handle<T>) -> T {
         let node = self.node_mut(h);
-        assert!(node.link.next.0 & 1 == 0);
+        assert!(node.link.next.is_used());
 
         let Link { prev, next } = node.link;
         self.link_mut(prev).next = next;
@@ -437,6 +460,50 @@ mod tests {
 
         assert!(list.pop_front() == None);
         assert!(linearize(&list) == vec![]);
+    }
+
+    #[test]
+    fn test_move_to_back() {
+        let mut list = List::default();
+        let h0 = list.push_back(0);
+        let _1 = list.push_front(1);
+        let _2 = list.push_back(2);
+        let h3 = list.push_front(3);
+        assert!(linearize(&list) == vec![3, 1, 0, 2]);
+
+        list.move_to_back(h3);
+        assert!(linearize(&list) == vec![1, 0, 2, 3]);
+
+        list.move_to_back(h0);
+        assert!(linearize(&list) == vec![1, 2, 3, 0]);
+
+        list.move_to_back(h3);
+        assert!(linearize(&list) == vec![1, 2, 0, 3]);
+
+        list.move_to_back(h3);
+        assert!(linearize(&list) == vec![1, 2, 0, 3]);
+    }
+
+    #[test]
+    fn test_move_to_front() {
+        let mut list = List::default();
+        let h0 = list.push_back(0);
+        let h1 = list.push_front(1);
+        let h2 = list.push_back(2);
+        let h3 = list.push_front(3);
+        assert!(linearize(&list) == vec![3, 1, 0, 2]);
+
+        list.move_to_front(h3);
+        assert!(linearize(&list) == vec![3, 1, 0, 2]);
+
+        list.move_to_front(h1);
+        assert!(linearize(&list) == vec![1, 3, 0, 2]);
+
+        list.move_to_front(h0);
+        assert!(linearize(&list) == vec![0, 1, 3, 2]);
+
+        list.move_to_front(h2);
+        assert!(linearize(&list) == vec![2, 0, 1, 3]);
     }
 
     fn linearize<T: Clone + Eq>(list: &List<T>) -> Vec<T> {
