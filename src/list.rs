@@ -1,3 +1,4 @@
+use std::iter::FusedIterator;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::num::NonZeroU32;
@@ -38,6 +39,11 @@ pub struct List<T> {
 }
 
 // Iterators
+//
+// Implementation note: for Iter and IterMut, the range of elements remaining
+// in the iterator is [next, prev); i.e. next is exclusive, prev is exclusive.
+//
+// We chose this encoding so that iteration is complete iff next == prev.
 
 pub struct IntoIter<T> {
     list: List<T>,
@@ -107,6 +113,8 @@ impl Index {
 
 // Iterators
 
+impl<T> FusedIterator for IntoIter<T> {}
+
 impl<T> Iterator for IntoIter<T> {
     type Item = T;
     fn next(&mut self) -> Option<Self::Item> { self.list.pop_front() }
@@ -116,31 +124,35 @@ impl<T> DoubleEndedIterator for IntoIter<T> {
     fn next_back(&mut self) -> Option<Self::Item> { self.list.pop_back() }
 }
 
+impl<'a, T> FusedIterator for Iter<'a, T> {}
+
 impl<'a, T> Iterator for Iter<'a, T> {
     type Item = &'a T;
     fn next(&mut self) -> Option<Self::Item> {
-        self.link.next = self.list.link(self.link.next).next;
         if self.link.prev == self.link.next { return None; }
         let handle = unsafe { Handle::unchecked(self.link.next) };
+        self.link.next = self.list.link(self.link.next).next;
         Some(unsafe { self.list.node(handle).data.assume_init_ref() })
     }
 }
 
 impl<'a, T> DoubleEndedIterator for Iter<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.link.prev = self.list.link(self.link.prev).prev;
         if self.link.prev == self.link.next { return None; }
+        self.link.prev = self.list.link(self.link.prev).prev;
         let handle = unsafe { Handle::unchecked(self.link.prev) };
         Some(unsafe { self.list.node(handle).data.assume_init_ref() })
     }
 }
 
+impl<'a, T> FusedIterator for IterMut<'a, T> {}
+
 impl<'a, T> Iterator for IterMut<'a, T> {
     type Item = &'a mut T;
     fn next(&mut self) -> Option<&'a mut T> {
-        self.link.next = self.list.link(self.link.next).next;
         if self.link.prev == self.link.next { return None; }
         let handle = unsafe { Handle::unchecked(self.link.next) };
+        self.link.next = self.list.link(self.link.next).next;
         let x = unsafe { self.list.node_mut(handle).data.assume_init_mut() };
         Some(unsafe { &mut *(x as *mut T) })
     }
@@ -148,8 +160,8 @@ impl<'a, T> Iterator for IterMut<'a, T> {
 
 impl<'a, T> DoubleEndedIterator for IterMut<'a, T> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        self.link.prev = self.list.link(self.link.prev).prev;
         if self.link.prev == self.link.next { return None; }
+        self.link.prev = self.list.link(self.link.prev).prev;
         let handle = unsafe { Handle::unchecked(self.link.prev) };
         let x = unsafe { self.list.node_mut(handle).data.assume_init_mut() };
         Some(unsafe { &mut *(x as *mut T) })
@@ -196,11 +208,13 @@ impl<T> List<T> {
     pub fn into_iter(self) -> IntoIter<T> { IntoIter { list: self } }
 
     pub fn iter(&self) -> Iter<'_, T> {
-        Iter { list: self, link: Link { prev: Index(0), next: Index(0) } }
+        let link = Link { prev: Index(0), next: self.heads[0].next };
+        Iter { list: self, link }
     }
 
     pub fn iter_mut(&mut self) -> IterMut<'_, T> {
-        IterMut { list: self, link: Link { prev: Index(0), next: Index(0) } }
+        let link = Link { prev: Index(0), next: self.heads[0].next };
+        IterMut { list: self, link }
     }
 
     pub fn move_to_back(&mut self, h: Handle<T>) {
