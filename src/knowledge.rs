@@ -337,7 +337,7 @@ impl Knowledge {
         entry.moved = !seen;
         entry.glyph = other.glyph;
         entry.rival = !trainer.is_some() && species != me.species();
-        entry.friend = trainer == me.trainer();
+        entry.friend = trainer.is_some() && trainer == me.trainer();
         entry.player = other.player;
         entry.view = get_view(other, view);
 
