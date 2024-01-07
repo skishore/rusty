@@ -82,6 +82,8 @@ lazy_static! {
             ('.', (FLAG_NONE,    Glyph::wide('.'),        "grass")),
             ('"', (FLAG_OBSCURE, Glyph::wdfg('"', 0x231), "tall grass")),
             ('#', (FLAG_BLOCKED, Glyph::wdfg('#', 0x010), "a tree")),
+            ('%', (FLAG_NONE,    Glyph::wdfg('%', 0x400), "flowers")),
+            ('~', (FLAG_NONE,    Glyph::wdfg('~', 0x015), "water")),
         ];
         let mut result = HashMap::default();
         for (ch, (flags, glyph, description)) in items {
@@ -382,6 +384,8 @@ fn mapgen(board: &mut Board) {
     let ft = Tile::get('.');
     let wt = Tile::get('#');
     let gt = Tile::get('"');
+    let fl = Tile::get('%');
+    let wa = Tile::get('~');
 
     board.fill_map(ft);
     let d100 = || random::<u32>() % 100;
@@ -442,6 +446,26 @@ fn mapgen(board: &mut Board) {
             }
         }
     }
+
+    let rng = |n: i32| random::<i32>().rem_euclid(n);
+    let mut river = vec![Point::default()];
+    for i in 1..size.1 {
+        let last = river.iter().last().unwrap().0;
+        let next = last + rng(3) - 1;
+        river.push(Point(next, i));
+    }
+    let target = river[0] + *river.iter().last().unwrap();
+    let offset = Point((size - target).0 / 2, 0);
+    for x in &river { board.set_tile_at(*x + offset, wa); }
+
+    let pos = |board: &Board| {
+        for _ in 0..100 {
+            let p = Point(rng(size.0), rng(size.1));
+            if let Status::Free = board.get_status(p) { return Some(p); }
+        }
+        None
+    };
+    for _ in 0..5 { if let Some(pos) = pos(board) { board.set_tile_at(pos, fl); } }
 }
 
 //////////////////////////////////////////////////////////////////////////////
