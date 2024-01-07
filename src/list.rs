@@ -203,6 +203,16 @@ impl<'a, T> IntoIterator for &'a mut List<T> {
 }
 
 impl<T> List<T> {
+    pub fn back(&self) -> Option<&T> {
+        if self.is_empty() { return None; }
+        Some(&self[unsafe { Handle::unchecked(self.heads[0].prev) }])
+    }
+
+    pub fn front(&self) -> Option<&T> {
+        if self.is_empty() { return None; }
+        Some(&self[unsafe { Handle::unchecked(self.heads[0].next) }])
+    }
+
     pub fn is_empty(&self) -> bool { self.heads[0].next == Index(0) }
 
     pub fn into_iter(self) -> IntoIter<T> { IntoIter { list: self } }
@@ -524,6 +534,8 @@ mod tests {
         assert!(list.check_invariants());
         let forwards: Vec<_> = list.iter().map(|x| x.clone()).collect();
         let backward: Vec<_> = list.iter().rev().map(|x| x.clone()).collect();
+        assert!(list.back() == backward.iter().next());
+        assert!(list.front() == forwards.iter().next());
         assert!(forwards == backward.into_iter().rev().collect::<Vec<_>>());
         forwards
     }
