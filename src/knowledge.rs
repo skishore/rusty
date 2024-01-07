@@ -170,12 +170,13 @@ pub fn get_view(entity: &Entity, view: &BoardView) -> EntityView {
 
 // Knowledge
 
-#[derive(Clone, Copy, Eq, PartialEq)] pub struct EntityIndex(i32);
+type CellHandle = Handle<CellKnowledge>;
+type EntityHandle = Handle<EntityKnowledge>;
 
 pub struct CellKnowledge {
     since: u32,
     point: Point,
-    index: Option<EntityIndex>,
+    handle: Option<EntityHandle>,
     pub tile: &'static Tile,
     pub visibility: i32,
 }
@@ -198,9 +199,9 @@ pub struct EntityKnowledge {
 pub struct Knowledge {
     since: u32,
     cells: List<CellKnowledge>,
-    map: HashMap<Point, Handle<CellKnowledge>>,
-    entity_by_id: HashMap<EID, EntityIndex>,
-    pub entities: Vec<EntityKnowledge>,
+    map: HashMap<Point, CellHandle>,
+    entity_by_id: HashMap<EID, EntityHandle>,
+    pub entities: List<EntityKnowledge>,
     pub focus: Option<EID>,
 }
 
@@ -227,12 +228,12 @@ impl<'a> CellResult<'a> {
     // Derived fields
 
     pub fn entity(&self) -> Option<&'a EntityKnowledge> {
-        self.cell.and_then(|x| x.index.map(|y| self.root.entity_raw(y)))
+        self.cell.and_then(|x| x.handle.map(|y| &self.root.entities[y]))
     }
 
     pub fn status(&self) -> Option<Status> {
         self.cell.map(|x| {
-            if x.index.is_some() { return Status::Occupied; }
+            if x.handle.is_some() { return Status::Occupied; }
             if x.tile.blocked() { Status::Blocked } else { Status::Free }
         })
     }
@@ -260,7 +261,7 @@ impl Knowledge {
     }
 
     pub fn entity(&self, eid: EID) -> Option<&EntityKnowledge> {
-        self.entity_by_id.get(&eid).map(|x| self.entity_raw(*x))
+        self.entity_by_id.get(&eid).map(|x| &self.entities[*x])
     }
 
     pub fn get(&self, p: Point) -> CellResult {
@@ -286,23 +287,23 @@ impl Knowledge {
             let visibility = vision.get_visibility_at(point);
             assert!(visibility >= 0);
 
-            let index = (|| {
+            let handle = (|| {
                 let other = view.get_entity(view.get_entity_at(point)?)?;
                 Some(self.update_entity(me, view, other, true))
             })();
 
-            let mut prev_index = None;
+            let mut prev_handle = None;
             let tile = view.get_tile_at(point);
             self.map.entry(point).and_modify(|x| {
                 self.cells.move_to_front(*x);
-                let cell = CellKnowledge { since, point, index, tile, visibility };
-                prev_index = std::mem::replace(&mut self.cells[*x], cell).index;
+                let cell = CellKnowledge { since, point, handle, tile, visibility };
+                prev_handle = std::mem::replace(&mut self.cells[*x], cell).handle;
             }).or_insert_with(|| {
-                let cell = CellKnowledge { since, point, index, tile, visibility };
+                let cell = CellKnowledge { since, point, handle, tile, visibility };
                 self.cells.push_front(cell)
             });
 
-            if prev_index != index && let Some(other) = prev_index {
+            if prev_handle != handle && let Some(other) = prev_handle {
                 self.mark_entity_moved(other, point);
             };
         }
@@ -313,16 +314,17 @@ impl Knowledge {
     // Private helpers
 
     fn update_entity(&mut self, me: &Entity, view: &BoardView,
-                     other: &Entity, seen: bool) -> EntityIndex {
-        let index = *self.entity_by_id.entry(other.id()).and_modify(|x| {
-            let existing = &mut self.entities[x.0 as usize];
+                     other: &Entity, seen: bool) -> EntityHandle {
+        let handle = *self.entity_by_id.entry(other.id()).and_modify(|x| {
+            self.entities.move_to_front(*x);
+            let existing = &mut self.entities[*x];
             if !existing.moved && !(seen && existing.pos == other.pos) {
                 let cell = &mut self.cells[*self.map.get(&existing.pos).unwrap()];
-                assert!(cell.index == Some(*x));
-                cell.index = None;
+                assert!(cell.handle == Some(*x));
+                cell.handle = None;
             };
         }).or_insert_with(|| {
-            self.entities.push(EntityKnowledge {
+            self.entities.push_front(EntityKnowledge {
                 eid: other.id(),
                 age: Default::default(),
                 pos: Default::default(),
@@ -333,13 +335,12 @@ impl Knowledge {
                 friend: Default::default(),
                 player: Default::default(),
                 view: Default::default(),
-            });
-            EntityIndex(self.entities.len() as i32 - 1)
+            })
         });
 
         let species = other.species();
         let trainer = other.trainer();
-        let entry = self.entity_mut(index);
+        let entry = &mut self.entities[handle];
 
         entry.age = if seen { 0 } else { 1 };
         entry.pos = other.pos;
@@ -351,15 +352,7 @@ impl Knowledge {
         entry.player = other.player;
         entry.view = get_view(other, view);
 
-        index
-    }
-
-    fn entity_raw(&self, index: EntityIndex) -> &EntityKnowledge {
-        &self.entities[index.0 as usize]
-    }
-
-    fn entity_mut(&mut self, index: EntityIndex) -> &mut EntityKnowledge {
-        &mut self.entities[index.0 as usize]
+        handle
     }
 
     fn age_out(&mut self, _player: bool) {
@@ -373,64 +366,29 @@ impl Knowledge {
         while self.map.len() > MAX_TILE_MEMORY {
             // We don't need to check age, here; we can only see a bounded
             // number of cells per turn, much less than MAX_TILE_MEMORY.
-            let CellKnowledge { point, index, .. } = self.cells.pop_back().unwrap();
-            if let Some(x) = index { self.mark_entity_moved(x, point); }
+            let CellKnowledge { point, handle, .. } = self.cells.pop_back().unwrap();
+            if let Some(x) = handle { self.mark_entity_moved(x, point); }
             self.map.remove(&point);
         }
 
-        let age_to_forget = |mut ages: Vec<i32>, limit: usize| -> Option<i32> {
-            assert!(limit > 0);
-            if ages.len() < limit as usize { return None; }
-            Some(*ages.select_nth_unstable(limit - 1).1 + 1)
-        };
+        while self.entity_by_id.len() > MAX_ENTITY_MEMORY {
+            let entity = self.entities.back().unwrap();
+            if entity.age == 0 || entity.friend { break; }
 
-        let ages = self.entities.iter().map(|x| x.age).collect();
-        if let Some(age) = age_to_forget(ages, MAX_ENTITY_MEMORY) {
-            let mut removed: Vec<EntityIndex> = vec![];
-            for (i, val) in self.entities.iter().enumerate() {
-                if val.age >= age && !val.friend {
-                    removed.push(EntityIndex(i as i32));
-                }
+            let handle = self.entity_by_id.remove(&entity.eid).unwrap();
+            if !entity.moved {
+                let cell = &mut self.cells[*self.map.get_mut(&entity.pos).unwrap()];
+                assert!(cell.handle == Some(handle));
+                cell.handle = None;
             }
-            removed.iter().rev().for_each(|x| { self.remove_entity(*x); });
+            self.entities.pop_back();
         }
     }
 
-    fn mark_entity_moved(&mut self, index: EntityIndex, pos: Point) {
-        let entity = self.entity_mut(index);
+    fn mark_entity_moved(&mut self, handle: EntityHandle, pos: Point) {
+        let entity = &mut self.entities[handle];
         assert!(entity.pos == pos);
         assert!(!entity.moved);
         entity.moved = true;
-    }
-
-    fn remove_entity(&mut self, index: EntityIndex) {
-        let EntityKnowledge { eid, pos, moved, .. } = *self.entity_raw(index);
-        let popped = self.entities.pop().unwrap();
-        let popped_index = EntityIndex(self.entities.len() as i32);
-        let swap = index != popped_index;
-
-        if !popped.moved {
-            let cell = &mut self.cells[*self.map.get_mut(&popped.pos).unwrap()];
-            assert!(cell.index == Some(popped_index));
-            cell.index = if swap { Some(index) } else { None };
-        }
-
-        if swap && !moved {
-            let cell = &mut self.cells[*self.map.get_mut(&pos).unwrap()];
-            assert!(cell.index == Some(index));
-            cell.index = None;
-        }
-
-        let deleted = if swap {
-            self.entity_by_id.remove(&eid);
-            self.entity_by_id.insert(popped.eid, index)
-        } else {
-            self.entity_by_id.remove(&popped.eid)
-        };
-        assert!(deleted == Some(popped_index));
-
-        if self.focus == Some(eid) { self.focus = None; }
-
-        if swap { *self.entity_mut(index) = popped; }
     }
 }
