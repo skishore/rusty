@@ -152,6 +152,10 @@ impl Point {
         self.0.abs() + self.1.abs()
     }
 
+    pub fn len_l1(&self) -> i32 {
+        max(self.0.abs(), self.1.abs())
+    }
+
     pub fn len_l2(&self) -> f64 {
         (self.len_l2_squared() as f64).sqrt()
     }
