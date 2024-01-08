@@ -76,6 +76,14 @@ impl Tile {
     pub fn obscure(&self) -> bool { self.flags & FLAG_OBSCURE != 0 }
 }
 
+impl PartialEq for &'static Tile {
+    fn eq(&self, next: &&'static Tile) -> bool {
+        *self as *const Tile == *next as *const Tile
+    }
+}
+
+impl Eq for &'static Tile {}
+
 lazy_static! {
     static ref TILES: HashMap<char, Tile> = {
         let items = [
@@ -664,51 +672,63 @@ fn rivals<'a>(trainer: &'a Trainer) -> Vec<(&'a EntityKnowledge, &'a PokemonView
 
 // AI state definitions:
 
-#[derive(Debug)]
-pub struct Pause {
-    time: i32,
+//#[derive(Debug)]
+//pub struct Pause {
+//    time: i32,
+//}
+//
+//#[derive(Debug)]
+//pub struct Fight {
+//    age: i32,
+//    target: Point,
+//}
+//
+//#[derive(Debug)]
+//pub struct Flight {
+//    age: i32,
+//    switch: i32,
+//    target: Vec<Point>,
+//}
+//
+//#[derive(Debug)]
+//pub struct Wander {
+//    time: i32,
+//}
+//
+//#[derive(Debug)]
+//pub struct Assess {
+//    switch: i32,
+//    target: Point,
+//    time: i32,
+//}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Goal {
+    Eat,
+    Drink,
+    Explore,
 }
 
 #[derive(Debug)]
-pub struct Fight {
-    age: i32,
-    target: Point,
+pub struct AIState {
+    goal: Goal,
+    plan: Vec<Point>,
+    till_hunger: i32,
+    till_thirst: i32,
 }
 
-#[derive(Debug)]
-pub struct Flight {
-    age: i32,
-    switch: i32,
-    target: Vec<Point>,
-}
-
-#[derive(Debug)]
-pub struct Wander {
-    time: i32,
-}
-
-#[derive(Debug)]
-pub struct Assess {
-    switch: i32,
-    target: Point,
-    time: i32,
-}
-
-#[derive(Debug)]
-pub enum AIState {
-    Pause(Pause),
-    Fight(Fight),
-    Flight(Flight),
-    Wander(Wander),
-    Assess(Assess),
-}
-
-impl Default for Wander {
-    fn default() -> Self { Self { time: 0 } }
-}
+const MAX_HUNGER: i32 = 256;
+const MAX_THIRST: i32 = 64;
 
 impl Default for AIState {
-    fn default() -> Self { Self::Wander(Wander::default()) }
+    fn default() -> Self {
+        Self {
+            goal: Goal::Explore,
+            plan: vec![],
+            till_hunger: random::<i32>().rem_euclid(MAX_HUNGER),
+            till_thirst: random::<i32>().rem_euclid(MAX_THIRST),
+        }
+    }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -735,10 +755,8 @@ fn explore_near(entity: &Entity, source: Point, age: i32, turns: f64) -> Action 
     let dir = (|| {
         let BFSResult { dirs, mut targets } = result?;
         if dirs.is_empty() || targets.is_empty() { return None; }
-        let target = (|| {
-            if source == pos { return *sample(&targets); }
-            *targets.select_nth_unstable_by_key(0, |x| (*x - pos).len_l2_squared()).1
-        })();
+        let target = *targets.select_nth_unstable_by_key(
+            0, |x| (*x - pos).len_l2_squared()).1;
         if let Entity::Pokemon(x) = entity { x.data.target.set(vec![target]); }
         let path = AStar(pos, target, ASTAR_LIMIT_WANDER, check).unwrap_or(vec![]);
         if path.is_empty() { return Some(*sample(&dirs)); }
@@ -749,27 +767,27 @@ fn explore_near(entity: &Entity, source: Point, age: i32, turns: f64) -> Action 
     Action::Move(MoveData { dir, turns })
 }
 
-fn assess(entity: &Entity, state: &mut Assess) -> Action {
-    state.time -= 1;
-    let time = state.time;
-    let a = 1 * ASSESS_TIME / 4;
-    let b = 2 * ASSESS_TIME / 4;
-    let c = 3 * ASSESS_TIME / 4;
-    let depth = if time < a {
-        -time
-    } else if time < c {
-        time - 2 * a
-    } else {
-        -time + 2 * c - 2 * a
-    };
-    let scale = 1000;
-    let angle = ASSESS_ANGLE * depth as f64 / b as f64;
-    let (sin, cos) = (angle.sin(), angle.cos());
-    let Point(dx, dy) = state.target - entity.pos;
-    let rx = (cos * (scale * dx) as f64) + (sin * (scale * dy) as f64);
-    let ry = (cos * (scale * dy) as f64) - (sin * (scale * dx) as f64);
-    Action::Look(Point(rx as i32, ry as i32))
-}
+//fn assess(entity: &Entity, state: &mut Assess) -> Action {
+//    state.time -= 1;
+//    let time = state.time;
+//    let a = 1 * ASSESS_TIME / 4;
+//    let b = 2 * ASSESS_TIME / 4;
+//    let c = 3 * ASSESS_TIME / 4;
+//    let depth = if time < a {
+//        -time
+//    } else if time < c {
+//        time - 2 * a
+//    } else {
+//        -time + 2 * c - 2 * a
+//    };
+//    let scale = 1000;
+//    let angle = ASSESS_ANGLE * depth as f64 / b as f64;
+//    let (sin, cos) = (angle.sin(), angle.cos());
+//    let Point(dx, dy) = state.target - entity.pos;
+//    let rx = (cos * (scale * dx) as f64) + (sin * (scale * dy) as f64);
+//    let ry = (cos * (scale * dy) as f64) - (sin * (scale * dx) as f64);
+//    Action::Look(Point(rx as i32, ry as i32))
+//}
 
 fn flight(entity: &Entity, sources: &Vec<Point>) -> Option<Action> {
     let mut map: HashMap<Point, i32> = HashMap::default();
@@ -827,83 +845,112 @@ fn flight(entity: &Entity, sources: &Vec<Point>) -> Option<Action> {
 }
 
 fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
-    pokemon.data.flight.take();
-    pokemon.data.target.take();
+    pokemon.data.debug.take();
+    let prev_flight = pokemon.data.flight.take();
+    let prev_target = pokemon.data.target.take();
+
     let mut ai = pokemon.data.ai.take().unwrap_or(Box::default());
-    let prey = pokemon.data.me.species.name == "Pidgey";
 
-    let mut targets = pokemon.known.entities.iter().filter(
-        |x| x.rival).collect::<Vec<_>>();
+    ai.till_hunger = max(0, ai.till_hunger - 1);
+    ai.till_thirst = max(0, ai.till_thirst - 1);
 
-    if !targets.is_empty() {
-        targets.sort_unstable_by_key(|x| x.age);
-        let EntityKnowledge { age, pos: target, .. } = *targets[0];
+    let (known, pos) = (&pokemon.known, pokemon.pos);
+    let check_plan = || {
+        pokemon.data.debug.set("Error: empty plan".into());
+        if ai.plan.is_empty() { return None; }
 
-        if prey {
-            let switch = match ai.as_ref() {
-                AIState::Flight(x) => x.switch,
-                AIState::Assess(x) => x.switch,
-                _ => MIN_FLIGHT_TIME,
-            };
-            let flight = matches!(*ai, AIState::Flight(_));
-            if age >= switch && flight {
-                *ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME });
-            } else if age < switch && !flight {
-                let switch = clamp(2 * switch, MIN_FLIGHT_TIME, MAX_FLIGHT_TIME);
-                *ai = AIState::Flight(Flight { age, switch, target: vec![] });
+        let next = *ai.plan.iter().last().unwrap();
+        let dir = next - pos;
+        pokemon.data.debug.set(format!("Error: bad step: {:?} -> {:?} = {:?}", pos, next, dir));
+        if dir.len_l1() != 1 { return None; }
+
+        let mut goals: Vec<Goal> = vec![];
+        if ai.till_hunger == 0 { goals.push(Goal::Eat); }
+        if ai.till_thirst == 0 { goals.push(Goal::Drink); }
+        if goals.is_empty() { goals.push(Goal::Explore); }
+        pokemon.data.debug.set(format!("Error: bad goal: {:?} (expected: {:?})", ai.goal, goals));
+        if !goals.contains(&ai.goal) { return None; }
+
+        for point in &ai.plan {
+            pokemon.data.debug.set(format!("Error: point blocked: {:?}", point));
+            match known.get(*point).status().unwrap_or(Status::Free) {
+                Status::Occupied => if *point == next { return None; }
+                Status::Blocked  => { return None; }
+                Status::Free     => {}
             }
-            if let AIState::Flight(x) = ai.as_mut() {
-                let target = targets.into_iter().filter_map(
-                    |x| if x.age < switch { Some(x.pos) } else { None }).collect();
-                (x.age, x.target) = (age, target);
-                assert!(!x.target.is_empty());
-            }
-        } else if age < MAX_FOLLOW_TIME || matches!(*ai, AIState::Fight(_)) {
-            *ai = AIState::Fight(Fight { age, target });
         }
-    }
-
-    if let AIState::Fight(x) = ai.as_ref() && x.age >= MAX_FOLLOW_TIME {
-        let (switch, target) = (MIN_FLIGHT_TIME, x.target);
-        *ai = AIState::Assess(Assess { switch, target, time: ASSESS_TIME })
-    }
-    if let AIState::Wander(x) = ai.as_ref() && x.time <= 0 {
-        let limit = (WANDER_TURNS * WANDER_STEPS as f64).round() as i32;
-        let time = random::<i32>().rem_euclid(limit);
-        *ai = AIState::Pause(Pause { time });
-    }
-    if matches!(&*ai, AIState::Pause(x) if x.time <= 0) ||
-       matches!(&*ai, AIState::Assess(x) if x.time <= 0) {
-        let time = random::<i32>().rem_euclid(WANDER_STEPS);
-        *ai = AIState::Wander(Wander { time  });
-    }
-
-    let mut replacement = None;
-    let action = match ai.as_mut() {
-        AIState::Pause(x) => {
-            x.time -= 1;
-            Action::Idle
-        }
-        AIState::Fight(x) => if x.age == 0 {
-            Action::Look(x.target - pokemon.pos)
-        } else {
-            explore_near(pokemon, x.target, x.age, 1.)
-        }
-        AIState::Flight(x) => flight(pokemon, &x.target).unwrap_or_else(||{
-            pokemon.data.flight.take();
-            let (target, time) = (x.target[0], ASSESS_TIME);
-            let mut x = Assess { switch: min(x.age + 1, x.switch), target, time };
-            let result = assess(pokemon, &mut x);
-            replacement = Some(AIState::Assess(x));
-            result
-        }),
-        AIState::Wander(x) => {
-            x.time -= 1;
-            explore_near(pokemon, pokemon.pos, 9999, WANDER_TURNS)
-        }
-        AIState::Assess(ref mut x) => assess(pokemon, x),
+        pokemon.data.debug.set("Following plan!".into());
+        Some(dir)
     };
-    if let Some(x) = replacement { *ai = x; }
+
+    if let Some(dir) = check_plan() {
+        ai.plan.pop();
+        pokemon.data.ai.set(Some(ai));
+        pokemon.data.flight.set(prev_flight);
+        pokemon.data.target.set(prev_target);
+        return Action::Move(MoveData { dir, turns: WANDER_TURNS })
+    } else {
+        ai.plan.clear();
+    }
+
+    let mut selected_goal = Goal::Explore;
+    let fallback = {
+        let check = |p: Point| {
+            if p == pos { return Status::Free; }
+            known.get(p).status().unwrap_or(Status::Free)
+        };
+
+        let (mut dirs, mut targets) = (vec![], vec![]);
+        let mut add_candidates = |tile: char, goal: Goal| {
+            if !dirs.is_empty() { return false; }
+            let tile = Tile::get(tile);
+            let target = |p: Point| known.get(p).tile() == Some(tile);
+            if target(pos) {
+                (dirs, targets) = (vec![Point::default()], vec![pos]);
+                selected_goal = goal;
+                return true;
+            }
+            if let Some(result) = BFS(pos, target, BFS_LIMIT_WANDER, check) {
+                (dirs, targets) = (result.dirs, result.targets);
+                selected_goal = goal;
+            }
+            return false;
+        };
+        if ai.till_thirst == 0 && add_candidates('~', Goal::Drink) {
+            ai.till_thirst = MAX_THIRST;
+        } else if ai.till_hunger == 0 && add_candidates('%', Goal::Eat) {
+            ai.till_hunger = MAX_HUNGER;
+        }
+        if dirs.is_empty() || targets.is_empty() {
+            explore_near(pokemon, pokemon.pos, 9999, WANDER_TURNS)
+        } else {
+            let dir = *sample(&dirs);
+            pokemon.data.target.set(targets);
+            Action::Move(MoveData { dir, turns: WANDER_TURNS })
+        }
+    };
+
+    let mut target = pokemon.data.target.take();
+    pokemon.data.target.set(target.clone());
+    let action = (||{
+        if target.is_empty() { return fallback; }
+
+        let target = *target.select_nth_unstable_by_key(
+            0, |x| (*x - pos).len_l2_squared()).1;
+        let check = |p: Point| {
+            if p == pos { return Status::Free; }
+            known.get(p).status().unwrap_or(Status::Free)
+        };
+        if let Some(path) = AStar(pos, target, ASTAR_LIMIT_WANDER, check) {
+            ai.goal = selected_goal;
+            ai.plan = path.into_iter().rev().collect();
+            if let Some(next) = ai.plan.pop() {
+                return Action::Move(MoveData { dir: (next - pos), turns: WANDER_TURNS });
+            }
+        }
+        fallback
+    })();
+
     pokemon.data.ai.set(Some(ai));
     action
 }
@@ -2093,8 +2140,20 @@ impl State {
 
         let entity = &self.board.entities[self.board.entity_order[2]];
         self.ui.render_map(entity, frame, Point::default(), None, slice);
-        let debug = match entity {
+        let (debug, extra) = match entity {
             Entity::Pokemon(x) => {
+                let mut ai = x.data.ai.take().unwrap_or(Box::default());
+                let plan = std::mem::replace(&mut ai.plan, vec![]);
+                let debug = format!("{:?}", ai);
+                ai.plan = plan;
+                for t in &ai.plan {
+                    let point = Point(2 * t.0, t.1);
+                    let mut glyph = slice.get(point).with_fg(0x400);
+                    if glyph.ch() == Glyph::wide(' ').ch() { glyph = Glyph::wdfg('.', 0x400); }
+                    slice.set(point, glyph);
+                }
+                x.data.ai.set(Some(ai));
+
                 let flight = x.data.flight.take();
                 for (point, value) in &flight {
                     let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
@@ -2110,12 +2169,11 @@ impl State {
                 }
                 x.data.target.set(target);
 
-                let ai = x.data.ai.take().unwrap_or(Box::default());
-                let result = format!("{:?}", ai);
-                x.data.ai.set(Some(ai));
-                result
+                let extra = x.data.debug.take();
+                x.data.debug.set(extra.clone());
+                (debug, extra)
             }
-            Entity::Trainer(_) => "<none>".into(),
+            Entity::Trainer(_) => ("<none>".into(), "".into()),
         };
         for eid in &self.board.entity_order {
             let other = &self.board.entities[*eid];
@@ -2131,7 +2189,7 @@ impl State {
             slice.set(point, glyph);
         };
         let slice = &mut Slice::new(buffer, self.ui.log);
-        slice.write_str(&debug);
+        slice.write_str(&debug).newline().write_str(&extra);
         if 1 == 1 { return; }
 
         self.ui.render_map(player, frame, offset, range, slice);
