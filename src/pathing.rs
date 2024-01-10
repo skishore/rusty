@@ -6,7 +6,7 @@ use crate::base::{HashMap, LOS, Matrix, Point, dirs};
 
 // BFS (breadth-first search)
 
-#[derive(Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum Status { Free, Blocked, Occupied }
 
 pub struct BFSResult {

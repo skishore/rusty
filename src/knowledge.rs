@@ -174,9 +174,9 @@ type CellHandle = Handle<CellKnowledge>;
 type EntityHandle = Handle<EntityKnowledge>;
 
 pub struct CellKnowledge {
-    since: u32,
-    point: Point,
     handle: Option<EntityHandle>,
+    pub point: Point,
+    pub since: u32,
     pub tile: &'static Tile,
     pub visibility: i32,
 }
@@ -197,12 +197,12 @@ pub struct EntityKnowledge {
 
 #[derive(Default)]
 pub struct Knowledge {
-    since: u32,
-    cells: List<CellKnowledge>,
-    map: HashMap<Point, CellHandle>,
-    entity_by_id: HashMap<EID, EntityHandle>,
+    cell_by_point: HashMap<Point, CellHandle>,
+    entity_by_eid: HashMap<EID, EntityHandle>,
+    pub cells: List<CellKnowledge>,
     pub entities: List<EntityKnowledge>,
     pub focus: Option<EID>,
+    pub since: u32,
 }
 
 pub struct CellResult<'a> {
@@ -261,11 +261,12 @@ impl Knowledge {
     }
 
     pub fn entity(&self, eid: EID) -> Option<&EntityKnowledge> {
-        self.entity_by_id.get(&eid).map(|x| &self.entities[*x])
+        self.entity_by_eid.get(&eid).map(|x| &self.entities[*x])
     }
 
     pub fn get(&self, p: Point) -> CellResult {
-        CellResult { root: self, cell: self.map.get(&p).map(|x| &self.cells[*x]) }
+        let cell_handle = self.cell_by_point.get(&p);
+        CellResult { root: self, cell: cell_handle.map(|x| &self.cells[*x]) }
     }
 
     // Writes
@@ -294,12 +295,12 @@ impl Knowledge {
 
             let mut prev_handle = None;
             let tile = view.get_tile_at(point);
-            self.map.entry(point).and_modify(|x| {
+            self.cell_by_point.entry(point).and_modify(|x| {
                 self.cells.move_to_front(*x);
-                let cell = CellKnowledge { since, point, handle, tile, visibility };
+                let cell = CellKnowledge { handle, point, since, tile, visibility };
                 prev_handle = std::mem::replace(&mut self.cells[*x], cell).handle;
             }).or_insert_with(|| {
-                let cell = CellKnowledge { since, point, handle, tile, visibility };
+                let cell = CellKnowledge { handle, point, since, tile, visibility };
                 self.cells.push_front(cell)
             });
 
@@ -315,11 +316,12 @@ impl Knowledge {
 
     fn update_entity(&mut self, me: &Entity, view: &BoardView,
                      other: &Entity, seen: bool) -> EntityHandle {
-        let handle = *self.entity_by_id.entry(other.id()).and_modify(|x| {
+        let handle = *self.entity_by_eid.entry(other.id()).and_modify(|x| {
             self.entities.move_to_front(*x);
             let existing = &mut self.entities[*x];
             if !existing.moved && !(seen && existing.pos == other.pos) {
-                let cell = &mut self.cells[*self.map.get(&existing.pos).unwrap()];
+                let cell_handle = self.cell_by_point.get(&existing.pos);
+                let cell = &mut self.cells[*cell_handle.unwrap()];
                 assert!(cell.handle == Some(*x));
                 cell.handle = None;
             };
@@ -363,21 +365,22 @@ impl Knowledge {
     fn forget(&mut self, player: bool) {
         if player { return; }
 
-        while self.map.len() > MAX_TILE_MEMORY {
+        while self.cell_by_point.len() > MAX_TILE_MEMORY {
             // We don't need to check age, here; we can only see a bounded
             // number of cells per turn, much less than MAX_TILE_MEMORY.
             let CellKnowledge { point, handle, .. } = self.cells.pop_back().unwrap();
             if let Some(x) = handle { self.mark_entity_moved(x, point); }
-            self.map.remove(&point);
+            self.cell_by_point.remove(&point);
         }
 
-        while self.entity_by_id.len() > MAX_ENTITY_MEMORY {
+        while self.entity_by_eid.len() > MAX_ENTITY_MEMORY {
             let entity = self.entities.back().unwrap();
             if entity.age == 0 || entity.friend { break; }
 
-            let handle = self.entity_by_id.remove(&entity.eid).unwrap();
+            let handle = self.entity_by_eid.remove(&entity.eid).unwrap();
             if !entity.moved {
-                let cell = &mut self.cells[*self.map.get_mut(&entity.pos).unwrap()];
+                let cell_handle = self.cell_by_point.get(&entity.pos);
+                let cell = &mut self.cells[*cell_handle.unwrap()];
                 assert!(cell.handle == Some(handle));
                 cell.handle = None;
             }
