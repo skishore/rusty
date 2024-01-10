@@ -8,7 +8,7 @@ use rand::random;
 use crate::{cast, static_assert_size};
 use crate::base::{Buffer, Color, Glyph, Slice};
 use crate::base::{HashMap, HashSet, LOS, Matrix, Point, Rect, dirs};
-use crate::base::{clamp, sample, weighted};
+use crate::base::{sample, weighted};
 use crate::effect::{Effect, Event, Frame, FT, ray_character, self};
 use crate::entity::{EID, PID, TID, EntityMap, EntityMapKey};
 use crate::entity::{Entity, Pokemon, Trainer};
@@ -601,7 +601,7 @@ pub enum Command {
     Return,
 }
 
-pub struct MoveData { dir: Point, turns: f64 }
+pub struct MoveData { dir: Point, look: Point, turns: f64 }
 
 pub enum Action {
     Idle,
@@ -702,7 +702,7 @@ fn rivals<'a>(trainer: &'a Trainer) -> Vec<(&'a EntityKnowledge, &'a PokemonView
 //    time: i32,
 //}
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Goal {
     Eat,
     Drink,
@@ -713,6 +713,8 @@ enum Goal {
 pub struct AIState {
     goal: Goal,
     plan: Vec<Point>,
+    since: u32,
+    hints: HashMap<Goal, Point>,
     till_hunger: i32,
     till_thirst: i32,
 }
@@ -725,6 +727,8 @@ impl Default for AIState {
         Self {
             goal: Goal::Explore,
             plan: vec![],
+            since: 0,
+            hints: HashMap::default(),
             till_hunger: random::<i32>().rem_euclid(MAX_HUNGER),
             till_thirst: random::<i32>().rem_euclid(MAX_THIRST),
         }
@@ -735,7 +739,15 @@ impl Default for AIState {
 
 // AI routines
 
-fn explore_near(entity: &Entity, source: Point, age: i32, turns: f64) -> Action {
+fn step(dir: Point, turns: f64) -> Action {
+    Action::Move(MoveData { dir, look: dir, turns })
+}
+
+fn wander(dir: Point) -> Action {
+    step(dir, WANDER_TURNS)
+}
+
+fn explore_near(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> {
     let (known, pos) = (&*entity.known, entity.pos);
     let check = |p: Point| {
         if p == pos { return Status::Free; }
@@ -749,22 +761,8 @@ fn explore_near(entity: &Entity, source: Point, age: i32, turns: f64) -> Action 
         done1(p) && dirs::ALL.iter().all(|x| !known.get(p + *x).blocked())
     };
 
-    let result = BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
-                 BFS(source, done1, BFS_LIMIT_WANDER, check));
-
-    let dir = (|| {
-        let BFSResult { dirs, mut targets } = result?;
-        if dirs.is_empty() || targets.is_empty() { return None; }
-        let target = *targets.select_nth_unstable_by_key(
-            0, |x| (*x - pos).len_l2_squared()).1;
-        if let Entity::Pokemon(x) = entity { x.data.target.set(vec![target]); }
-        let path = AStar(pos, target, ASTAR_LIMIT_WANDER, check).unwrap_or(vec![]);
-        if path.is_empty() { return Some(*sample(&dirs)); }
-        Some(path[0] - pos)
-    })();
-
-    let dir = dir.unwrap_or_else(|| *sample(&dirs::ALL));
-    Action::Move(MoveData { dir, turns })
+    BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
+    BFS(source, done1, BFS_LIMIT_WANDER, check))
 }
 
 //fn assess(entity: &Entity, state: &mut Assess) -> Action {
@@ -841,118 +839,144 @@ fn flight(entity: &Entity, sources: &Vec<Point>) -> Option<Action> {
     if let Entity::Pokemon(x) = entity { x.data.target.set(best_point); }
 
     if best_steps[0] == Point::default() { return None; }
-    Some(Action::Move(MoveData { dir: *sample(&best_steps), turns: 1.5 }))
+    Some(step(*sample(&best_steps), 1.5))
 }
 
-fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
-    pokemon.data.debug.take();
-    let prev_flight = pokemon.data.flight.take();
-    let prev_target = pokemon.data.target.take();
-
-    let mut ai = pokemon.data.ai.take().unwrap_or(Box::default());
-
+fn update_ai_state(entity: &Entity, hints: &[(Goal, &'static Tile)], ai: &mut AIState) {
     ai.till_hunger = max(0, ai.till_hunger - 1);
     ai.till_thirst = max(0, ai.till_thirst - 1);
 
-    let (known, pos) = (&pokemon.known, pokemon.pos);
-    let check_plan = || {
-        pokemon.data.debug.set("Error: empty plan".into());
-        if ai.plan.is_empty() { return None; }
-
-        let next = *ai.plan.iter().last().unwrap();
-        let dir = next - pos;
-        pokemon.data.debug.set(format!("Error: bad step: {:?} -> {:?} = {:?}", pos, next, dir));
-        if dir.len_l1() != 1 { return None; }
-
-        let mut goals: Vec<Goal> = vec![];
-        if ai.till_hunger == 0 { goals.push(Goal::Eat); }
-        if ai.till_thirst == 0 { goals.push(Goal::Drink); }
-        if goals.is_empty() { goals.push(Goal::Explore); }
-        pokemon.data.debug.set(format!("Error: bad goal: {:?} (expected: {:?})", ai.goal, goals));
-        if !goals.contains(&ai.goal) { return None; }
-
-        for point in &ai.plan {
-            pokemon.data.debug.set(format!("Error: point blocked: {:?}", point));
-            match known.get(*point).status().unwrap_or(Status::Free) {
-                Status::Occupied => if *point == next { return None; }
-                Status::Blocked  => { return None; }
-                Status::Free     => {}
+    let known = &entity.known;
+    let mut seen = HashSet::default();
+    for cell in &known.cells {
+        if (ai.since - cell.since) as i32 >= 0 { break; }
+        for (goal, tile) in hints {
+            if cell.tile == tile && seen.insert(goal) {
+                ai.hints.insert(*goal, cell.point);
             }
         }
-        pokemon.data.debug.set("Following plan!".into());
-        Some(dir)
-    };
+    }
+    ai.since = known.since;
+}
 
-    if let Some(dir) = check_plan() {
-        ai.plan.pop();
-        pokemon.data.ai.set(Some(ai));
-        pokemon.data.flight.set(prev_flight);
-        pokemon.data.target.set(prev_target);
-        return Action::Move(MoveData { dir, turns: WANDER_TURNS })
-    } else {
-        ai.plan.clear();
+fn plan_from_cached(entity: &Entity, ai: &mut AIState) -> Option<Action> {
+    if ai.plan.is_empty() { return None; }
+
+    let (known, pos) = (&entity.known, entity.pos);
+    let next = *ai.plan.iter().last().unwrap();
+    let dir = next - pos;
+    if dir.len_l1() != 1 { return None; }
+
+    let mut goals: Vec<Goal> = vec![];
+    if ai.till_hunger == 0 && ai.hints.contains_key(&Goal::Eat) {
+        goals.push(Goal::Eat);
+    }
+    if ai.till_thirst == 0 && ai.hints.contains_key(&Goal::Drink) {
+        goals.push(Goal::Drink);
+    }
+    if goals.is_empty() { goals.push(Goal::Explore); }
+    if !goals.contains(&ai.goal) { return None; }
+
+    for point in &ai.plan {
+        match known.get(*point).status().unwrap_or(Status::Free) {
+            Status::Occupied => if *point == next { return None; }
+            Status::Blocked  => { return None; }
+            Status::Free     => {}
+        }
     }
 
-    let mut selected_goal = Goal::Explore;
+    ai.plan.pop();
+    let mut target = next;
+    for next in ai.plan.iter().rev().take(3) {
+        for point in LOS(pos, *next) {
+            if known.get(point).blocked() { break; }
+        }
+        target = *next;
+    }
+    Some(Action::Move(MoveData { dir, look: target - pos, turns: WANDER_TURNS }))
+}
+
+fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
+    pokemon.data.debug.take();
+    let hints = [
+        (Goal::Drink, Tile::get('~')),
+        (Goal::Eat, Tile::get('%')),
+    ];
+    update_ai_state(pokemon, &hints, ai);
+    if let Some(x) = plan_from_cached(pokemon, ai) { return x; }
+
+    ai.plan.clear();
+    ai.goal = Goal::Explore;
+    pokemon.data.flight.take();
+    pokemon.data.target.take();
+    pokemon.data.debug.set("Recomputing plan!".into());
+    let (mut dirs, mut targets) = (vec![], vec![]);
+    let (known, pos) = (&pokemon.known, pokemon.pos);
+
     let fallback = {
         let check = |p: Point| {
             if p == pos { return Status::Free; }
             known.get(p).status().unwrap_or(Status::Free)
         };
 
-        let (mut dirs, mut targets) = (vec![], vec![]);
-        let mut add_candidates = |tile: char, goal: Goal| {
+        let mut add_candidates = |goal: Goal| {
             if !dirs.is_empty() { return false; }
-            let tile = Tile::get(tile);
-            let target = |p: Point| known.get(p).tile() == Some(tile);
+            let tile = hints.iter().find_map(
+                |x| if x.0 == goal { Some(x.1) } else { None });
+            if tile.is_none() { return false; }
+
+            let target = |p: Point| known.get(p).tile() == tile;
             if target(pos) {
                 (dirs, targets) = (vec![Point::default()], vec![pos]);
-                selected_goal = goal;
+                ai.goal = goal;
                 return true;
             }
             if let Some(result) = BFS(pos, target, BFS_LIMIT_WANDER, check) {
                 (dirs, targets) = (result.dirs, result.targets);
-                selected_goal = goal;
+                ai.goal = goal;
             }
             return false;
         };
-        if ai.till_thirst == 0 && add_candidates('~', Goal::Drink) {
+
+        if ai.till_thirst == 0 && add_candidates(Goal::Drink) {
             ai.till_thirst = MAX_THIRST;
-        } else if ai.till_hunger == 0 && add_candidates('%', Goal::Eat) {
+        } else if ai.till_hunger == 0 && add_candidates(Goal::Eat) {
             ai.till_hunger = MAX_HUNGER;
         }
-        if dirs.is_empty() || targets.is_empty() {
-            explore_near(pokemon, pokemon.pos, 9999, WANDER_TURNS)
-        } else {
-            let dir = *sample(&dirs);
-            pokemon.data.target.set(targets);
-            Action::Move(MoveData { dir, turns: WANDER_TURNS })
-        }
-    };
-
-    let mut target = pokemon.data.target.take();
-    pokemon.data.target.set(target.clone());
-    let action = (||{
-        if target.is_empty() { return fallback; }
-
-        let target = *target.select_nth_unstable_by_key(
-            0, |x| (*x - pos).len_l2_squared()).1;
-        let check = |p: Point| {
-            if p == pos { return Status::Free; }
-            known.get(p).status().unwrap_or(Status::Free)
-        };
-        if let Some(path) = AStar(pos, target, ASTAR_LIMIT_WANDER, check) {
-            ai.goal = selected_goal;
-            ai.plan = path.into_iter().rev().collect();
-            if let Some(next) = ai.plan.pop() {
-                return Action::Move(MoveData { dir: (next - pos), turns: WANDER_TURNS });
+        if dirs.is_empty() {
+            if let Some(x) = explore_near(pokemon, pokemon.pos, 9999) {
+                (dirs, targets) = (x.dirs, x.targets);
             }
         }
-        fallback
-    })();
+        if dirs.is_empty() { return wander(*sample(&dirs::ALL)); }
+        wander(*sample(&dirs))
+    };
 
+    if targets.is_empty() { return fallback; }
+
+    let exploring = ai.goal == Goal::Explore;
+    let status = if exploring { Status::Occupied } else { Status::Free };
+    let target = *targets.select_nth_unstable_by_key(
+        0, |x| (*x - pos).len_l2_squared()).1;
+    let check = |p: Point| {
+        if p == pos { return Status::Free; }
+        known.get(p).status().unwrap_or(status)
+    };
+    pokemon.data.target.set(targets);
+
+    if let Some(path) = AStar(pos, target, ASTAR_LIMIT_WANDER, check) {
+        ai.plan = path.into_iter().rev().collect();
+        if let Some(x) = plan_from_cached(pokemon, ai) { return x; }
+        ai.plan.clear();
+    }
+    fallback
+}
+
+fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
+    let mut ai = pokemon.data.ai.take().unwrap_or(Box::default());
+    let result = plan_from_state(pokemon, &mut ai);
     pokemon.data.ai.set(Some(ai));
-    action
+    result
 }
 
 fn check_follower_square(known: &Knowledge, trainer: &Trainer,
@@ -1055,13 +1079,12 @@ fn path_to_target<F: Fn(Point) -> bool>(
             |x| ((*x + source - target).len_nethack() - range).abs()).collect();
         let best = *scores.iter().reduce(|acc, x| min(acc, x)).unwrap();
         let opts: Vec<_> = dirs.iter().enumerate().filter(|(i, _)| scores[*i] == best).collect();
-        return Action::Move(MoveData { dir: *sample(&opts).1, turns: 1. });
+        return step(*sample(&opts).1, 1.);
     }
 
     let path = AStar(source, target, ASTAR_LIMIT_ATTACK, check);
     let dir = path.and_then(|x| if x.is_empty() { None } else { Some(x[0] - source) });
-    let dir = dir.unwrap_or_else(|| *sample(&dirs::ALL));
-    Action::Move(MoveData { dir, turns: 1. })
+    step(dir.unwrap_or_else(|| *sample(&dirs::ALL)), 1.)
 }
 
 fn defend_leader(pokemon: &Pokemon, trainer: &Trainer) -> Option<Action> {
@@ -1071,7 +1094,7 @@ fn defend_leader(pokemon: &Pokemon, trainer: &Trainer) -> Option<Action> {
     let goal = defend_at_pos(pokemon.pos, trainer)?;
     let path = AStar(pokemon.pos, goal, ASTAR_LIMIT_ATTACK, check)?;
     if path.is_empty() { return Some(Action::Idle); }
-    Some(Action::Move(MoveData { dir: (path[0] - pokemon.pos), turns: 1. }))
+    Some(step(path[0] - pokemon.pos, 1.))
 }
 
 fn follow_command(pokemon: &Pokemon, trainer: &Trainer, command: &Command) -> Action {
@@ -1096,16 +1119,13 @@ fn follow_leader(pokemon: &Pokemon, trainer: &Trainer) -> Action {
         let mut moves: Vec<_> = dirs::ALL.iter().filter_map(
             |x| if okay(pp + *x) { Some((1, *x)) } else { None }).collect();
         if okay(pp) { moves.push((16, Point::default())); }
-        if !moves.is_empty() {
-            let dir = *weighted(&moves);
-            return Action::Move(MoveData { dir, turns: 1. });
-        }
+        if !moves.is_empty() { return step(*weighted(&moves), 1.); }
     }
 
     let check = |p: Point| known.get(p).status().unwrap_or(Status::Occupied);
     let path = AStar(pp, tp, ASTAR_LIMIT_ATTACK, check).unwrap_or_default();
     let dir = if !path.is_empty() { path[0] - pp } else { *sample(&dirs::ALL) };
-    Action::Move(MoveData { dir, turns: 1. })
+    step(dir, 1.)
 }
 
 fn plan_pokemon(board: &Board, pokemon: &Pokemon) -> Action {
@@ -1186,29 +1206,31 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             state.board.entities[eid].dir = dir;
             ActionResult::success()
         }
-        Action::Move(MoveData { dir ,turns }) => {
+        Action::Move(MoveData { dir, look, turns }) => {
             if dir == Point::default() {
                 return ActionResult::success_turns(turns);
             }
-            // Look, first then move. We change direction even if the square
-            // is blocked and we cannot later move, so we see why next turn.
-            state.board.entities[eid].dir = dir;
+            state.board.entities[eid].dir = look;
             let entity = &state.board.entities[eid];
             let (source, target) = (entity.pos, entity.pos + dir);
             match state.board.get_status(target) {
-                Status::Blocked => ActionResult::failure(),
+                Status::Blocked => {
+                    state.board.entities[eid].dir = dir;
+                    ActionResult::failure()
+                }
                 Status::Occupied => {
-                    let player = entity.player;
                     let other = state.board.get_entity_at(target);
                     let other = other.map(|x| &state.board.entities[x]);
                     if let Some(Entity::Pokemon(x)) = other &&
                        x.data.me.trainer.map(|x| x.eid()) == Some(eid) {
-                        if player {
+                        if entity.player {
                             state.board.log(format!(
                                 "You swap places with {}.", name(&x.data.me)));
                         }
                         state.board.swap_entities(source, target);
+                        return ActionResult::success_turns(turns);
                     }
+                    state.board.entities[eid].dir = dir;
                     ActionResult::failure()
                 }
                 Status::Free => {
@@ -1492,8 +1514,7 @@ fn process_input(state: &mut State, input: Input) {
     }
 
     let dir = if let Input::Char(x) = input { get_direction(x) } else { None };
-    state.input = dir.map(|x| Action::Move(MoveData { dir: x, turns: 1. }))
-                     .unwrap_or(Action::WaitForInput);
+    state.input = dir.map(|x| step(x, 1.)).unwrap_or(Action::WaitForInput);
 }
 
 fn update_focus(state: &mut State) {
