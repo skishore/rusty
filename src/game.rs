@@ -955,12 +955,18 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
     if targets.is_empty() { return fallback; }
 
     let exploring = ai.goal == Goal::Explore;
-    let status = if exploring { Status::Occupied } else { Status::Free };
-    let target = *targets.select_nth_unstable_by_key(
+    let mut target = *targets.select_nth_unstable_by_key(
         0, |x| (*x - pos).len_l2_squared()).1;
+    if exploring {
+        for _ in 0..64 {
+            let candidate = target + *sample(&dirs::ALL);
+            if known.get(candidate).tile().is_none() { target = candidate; }
+        }
+    }
+
     let check = |p: Point| {
         if p == pos { return Status::Free; }
-        known.get(p).status().unwrap_or(status)
+        known.get(p).status().unwrap_or(Status::Free)
     };
     pokemon.data.target.set(targets);
 
