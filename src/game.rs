@@ -1639,6 +1639,18 @@ fn process_input(state: &mut State, input: Input) {
         return;
     }
 
+    if input == Input::Char('q') || input == Input::Char('w') {
+        let board = &state.board;
+        let i = board.entity_order.iter().enumerate().find_map(|x| {
+            let okay = Some(board.entities[*x.1].id()) == state.point_of_view;
+            if okay { Some(x.0) } else { None }
+        }).unwrap_or(0);
+        let l = board.entity_order.len();
+        let j = (i + if input == Input::Char('q') { l - 1 } else { 1 }) % l;
+        state.point_of_view = if j == 0 { None } else { Some(board.entity_order[j]) };
+        return;
+    }
+
     let dir = if let Input::Char(x) = input { get_direction(x) } else { None };
     state.input = dir.map(|x| step(x, 1.)).unwrap_or(Action::WaitForInput);
 }
@@ -1716,7 +1728,9 @@ fn update_state(state: &mut State) {
 
     if update {
         state.board.update_known(state.player.eid());
-        state.board.update_known(state.board.entity_order[2]);
+        if let Some(x) = state.point_of_view && state.board.entity_order.contains(&x) {
+            state.board.update_known(x);
+        }
     }
     update_focus(state);
 }
@@ -2202,6 +2216,7 @@ pub struct State {
     inputs: Vec<Input>,
     choice: Option<i32>,
     target: Option<Box<Target>>,
+    point_of_view: Option<EID>,
     player: TID,
     menu: Option<Menu>,
     ui: UI,
@@ -2246,6 +2261,8 @@ impl State {
         }
         board.update_known(tid.eid());
 
+        let point_of_view = Some(board.entity_order[2]);
+
         Self {
             board,
             focus: Focus {
@@ -2257,6 +2274,7 @@ impl State {
             inputs: vec![],
             choice: None,
             target: None,
+            point_of_view,
             player: tid,
             menu: None,
         }
@@ -2285,64 +2303,71 @@ impl State {
             _ => None,
         });
 
-        let entity = &self.board.entities[self.board.entity_order[2]];
-        self.ui.render_map(entity, frame, Point::default(), None, slice);
-        let (debug, extra) = match entity {
-            Entity::Pokemon(x) => {
-                let mut ai = x.data.ai.take().unwrap_or(Box::default());
-                let debug = {
-                    let a = std::mem::take(&mut ai.plan);
-                    let b = std::mem::take(&mut ai.flight.distances);
-                    let debug = format!("{:?}", ai);
-                    ai.flight.distances = b;
-                    ai.plan = a;
-                    debug
-                };
-                if 0 == 1 {
-                    for (point, value) in &ai.flight.distances {
-                        let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
-                        slice.set(Point(2 * point.0, point.1), Glyph::wdfg(ch, Color::gray()));
+        let board = &self.board;
+        let offset = Point::default();
+        let entity = board.entity_order.iter().find_map(|x| {
+            let okay = Some(board.entities[*x].id()) == self.point_of_view;
+            if okay { Some(&board.entities[*x]) } else { None }
+        });
+        if let Some(entity) = entity {
+            self.ui.render_map(entity, frame, Point::default(), None, slice);
+            let (debug, extra) = match entity {
+                Entity::Pokemon(x) => {
+                    let mut ai = x.data.ai.take().unwrap_or(Box::default());
+                    let debug = {
+                        let a = std::mem::take(&mut ai.plan);
+                        let b = std::mem::take(&mut ai.flight.distances);
+                        let debug = format!("{:?}", ai);
+                        ai.flight.distances = b;
+                        ai.plan = a;
+                        debug
+                    };
+                    if 0 == 1 {
+                        for (point, value) in &ai.flight.distances {
+                            let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
+                            slice.set(Point(2 * point.0, point.1), Glyph::wdfg(ch, Color::gray()));
+                        }
                     }
-                }
-                for step in &ai.plan {
-                    if step.kind == StepKind::Look { continue; }
-                    let point = Point(2 * step.target.0, step.target.1);
-                    let mut glyph = slice.get(point).with_fg(0x400);
-                    if glyph.ch() == Glyph::wide(' ').ch() { glyph = Glyph::wdfg('.', 0x400); }
-                    slice.set(point, glyph);
-                }
-                x.data.ai.set(Some(ai));
+                    for step in &ai.plan {
+                        if step.kind == StepKind::Look { continue; }
+                        let point = Point(2 * step.target.0, step.target.1);
+                        let mut glyph = slice.get(point).with_fg(0x400);
+                        if glyph.ch() == Glyph::wide(' ').ch() { glyph = Glyph::wdfg('.', 0x400); }
+                        slice.set(point, glyph);
+                    }
+                    x.data.ai.set(Some(ai));
 
-                let target = x.data.target.take();
-                for t in &target {
-                    let point = Point(2 * t.0, t.1);
-                    let glyph = slice.get(point).with_fg(Color::black()).with_bg(0x400);
-                    slice.set(point, glyph);
-                }
-                x.data.target.set(target);
+                    let target = x.data.target.take();
+                    for t in &target {
+                        let point = Point(2 * t.0, t.1);
+                        let glyph = slice.get(point).with_fg(Color::black()).with_bg(0x400);
+                        slice.set(point, glyph);
+                    }
+                    x.data.target.set(target);
 
-                let extra = x.data.debug.take();
-                x.data.debug.set(extra.clone());
-                (debug, extra)
-            }
-            Entity::Trainer(_) => ("<none>".into(), "".into()),
-        };
-        for eid in &self.board.entity_order {
-            let other = &self.board.entities[*eid];
-            let point = Point(2 * other.pos.0, other.pos.1);
-            slice.set(point, other.glyph);
-        }
-        for other in &entity.known.entities {
-            let color = if other.age == 0 { 0x040 } else {
-                if other.moved { 0x400 } else { 0x440 }
+                    let extra = x.data.debug.take();
+                    x.data.debug.set(extra.clone());
+                    (debug, extra)
+                }
+                Entity::Trainer(_) => ("<none>".into(), "".into()),
             };
-            let glyph = other.glyph.with_fg(Color::black()).with_bg(color);
-            let point = Point(2 * other.pos.0, other.pos.1);
-            slice.set(point, glyph);
-        };
-        let slice = &mut Slice::new(buffer, self.ui.log);
-        slice.write_str(&debug).newline().write_str(&extra);
-        if 1 == 1 { return; }
+            for eid in &self.board.entity_order {
+                let other = &self.board.entities[*eid];
+                let point = Point(2 * other.pos.0, other.pos.1);
+                slice.set(point, other.glyph);
+            }
+            for other in &entity.known.entities {
+                let color = if other.age == 0 { 0x040 } else {
+                    if other.moved { 0x400 } else { 0x440 }
+                };
+                let glyph = other.glyph.with_fg(Color::black()).with_bg(color);
+                let point = Point(2 * other.pos.0, other.pos.1);
+                slice.set(point, glyph);
+            };
+            let slice = &mut Slice::new(buffer, self.ui.log);
+            slice.write_str(&debug).newline().write_str(&extra);
+            return;
+        }
 
         self.ui.render_map(player, frame, offset, range, slice);
 
