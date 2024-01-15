@@ -16,7 +16,7 @@ use crate::entity::{PokemonArgs, SummonArgs, TrainerArgs};
 use crate::entity::{PokemonEdge, PokemonIndividualData, PokemonSpeciesData};
 use crate::knowledge::{Knowledge, Vision, VisionArgs, get_pp, get_hp};
 use crate::knowledge::{EntityKnowledge, EntityView, PokemonView};
-use crate::pathing::{AStar, DijkstraMap, DijkstraMode};
+use crate::pathing::{AStar, DijkstraMap};
 use crate::pathing::{BFS, BFSResult, Status};
 
 //////////////////////////////////////////////////////////////////////////////
@@ -45,6 +45,7 @@ const ASTAR_LIMIT_ATTACK: i32 = 32;
 const ASTAR_LIMIT_WANDER: i32 = 256;
 const BFS_LIMIT_ATTACK: i32 = 8;
 const BFS_LIMIT_WANDER: i32 = 64;
+const FLIGHT_MAP_LIMIT: i32 = 1024;
 
 const PLAYER_KEY: char = 'a';
 const RETURN_KEY: char = 'r';
@@ -703,18 +704,37 @@ fn rivals<'a>(trainer: &'a Trainer) -> Vec<(&'a EntityKnowledge, &'a PokemonView
 //}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum Goal {
-    Eat,
-    Drink,
-    Explore,
+enum Goal { Chase, Drink, Eat, Explore, Flee }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StepKind { Calm, Drink, Eat, Look, Move }
+
+#[derive(Clone, Copy, Debug)]
+struct Step { kind: StepKind, target: Point }
+
+type Hint = (Goal, &'static Tile);
+
+#[derive(Debug)]
+pub struct FightState {
+    age: i32,
+    target: Point,
+}
+
+#[derive(Debug, Default)]
+pub struct FlightState {
+    distances: HashMap<Point, i32>,
+    threats: Vec<Point>,
+    fleeing: bool,
 }
 
 #[derive(Debug)]
 pub struct AIState {
     goal: Goal,
-    plan: Vec<Point>,
+    plan: Vec<Step>,
     since: u32,
     hints: HashMap<Goal, Point>,
+    fight: Option<FightState>,
+    flight: FlightState,
     till_hunger: i32,
     till_thirst: i32,
 }
@@ -729,6 +749,8 @@ impl Default for AIState {
             plan: vec![],
             since: 0,
             hints: HashMap::default(),
+            fight: None,
+            flight: FlightState::default(),
             till_hunger: random::<i32>().rem_euclid(MAX_HUNGER),
             till_thirst: random::<i32>().rem_euclid(MAX_THIRST),
         }
@@ -765,88 +787,76 @@ fn explore_near(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> {
     BFS(source, done1, BFS_LIMIT_WANDER, check))
 }
 
-//fn assess(entity: &Entity, state: &mut Assess) -> Action {
-//    state.time -= 1;
-//    let time = state.time;
-//    let a = 1 * ASSESS_TIME / 4;
-//    let b = 2 * ASSESS_TIME / 4;
-//    let c = 3 * ASSESS_TIME / 4;
-//    let depth = if time < a {
-//        -time
-//    } else if time < c {
-//        time - 2 * a
-//    } else {
-//        -time + 2 * c - 2 * a
-//    };
-//    let scale = 1000;
-//    let angle = ASSESS_ANGLE * depth as f64 / b as f64;
-//    let (sin, cos) = (angle.sin(), angle.cos());
-//    let Point(dx, dy) = state.target - entity.pos;
-//    let rx = (cos * (scale * dx) as f64) + (sin * (scale * dy) as f64);
-//    let ry = (cos * (scale * dy) as f64) - (sin * (scale * dx) as f64);
-//    Action::Look(Point(rx as i32, ry as i32))
-//}
+fn assess_threats(source: Point, ai: &mut AIState) {
+    if !ai.flight.fleeing { return; }
 
-fn flight(entity: &Entity, sources: &Vec<Point>) -> Option<Action> {
-    let mut map: HashMap<Point, i32> = HashMap::default();
-    for source in sources { map.insert(*source, 0); }
+    let target = ai.flight.threats[0];
+    let Point(dx, dy) = target - source;
 
-    let limit = 1024;
-    let (known, pos) = (&*entity.known, entity.pos);
-
-    let check = |p: Point| {
-        if p == pos { return Status::Free; }
-        known.get(p).status().unwrap_or(Status::Blocked)
-    };
-    DijkstraMap(DijkstraMode::Expand(limit), check, 1, &mut map);
-
-    let frontier: Vec<_> = map.keys().filter_map(|x| {
-        let okay = dirs::ALL.iter().any(|y| !map.contains_key(&(*x + *y)));
-        if okay { Some(*x) } else { None }
-    }).collect();
-    for pos in &frontier { *map.get_mut(&pos).unwrap() += FOV_RADIUS_NPC }
-    for val in map.values_mut() { *val *= -10; }
-
-    DijkstraMap(DijkstraMode::Update, check, 1, &mut map);
-
-    let mut best_score = 9999;
-    let mut best_point = vec![];
-    for (point, value) in &map {
-        if *value < best_score {
-            best_score = *value;
-            best_point = vec![*point];
-        } else if *value == best_score {
-            best_point.push(*point);
-        }
-    }
-    assert!(best_score % 10 == 0);
-
-    let lookup = |x: &Point| map.get(x).map(|x| *x).unwrap_or(-9999);
-    let mut best_steps = vec![Point::default()];
-    let mut best_score = lookup(&pos);
-
-    for dir in &dirs::ALL {
-        let option = pos + *dir;
-        if check(option) != Status::Free { continue; }
-        let score = lookup(&option);
-        if score > best_score { continue; }
-        if score < best_score { best_steps.clear(); }
-        best_steps.push(*dir);
-        best_score = score;
+    for i in 0..ASSESS_TIME {
+        let a = 1 * ASSESS_TIME / 4;
+        let b = 2 * ASSESS_TIME / 4;
+        let c = 3 * ASSESS_TIME / 4;
+        let depth = if i < a {
+            -i
+        } else if i < c {
+            i - 2 * a
+        } else {
+            -i + 2 * c - 2 * a
+        };
+        let scale = 1000;
+        let angle = ASSESS_ANGLE * depth as f64 / b as f64;
+        let (sin, cos) = (angle.sin(), angle.cos());
+        let rx = (cos * (scale * dx) as f64) + (sin * (scale * dy) as f64);
+        let ry = (cos * (scale * dy) as f64) - (sin * (scale * dx) as f64);
+        let target = Point(rx as i32, ry as i32);
+        ai.plan.push(Step { kind: StepKind::Look, target });
     }
 
-    if let Entity::Pokemon(x) = entity { x.data.flight.set(map); }
-    if let Entity::Pokemon(x) = entity { x.data.target.set(best_point); }
-
-    if best_steps[0] == Point::default() { return None; }
-    Some(step(*sample(&best_steps), 1.5))
+    ai.plan.push(Step { kind: StepKind::Calm, target: source });
 }
 
-fn update_ai_state(entity: &Entity, hints: &[(Goal, &'static Tile)], ai: &mut AIState) {
+fn flee_from_threats(entity: &Entity, ai: &mut AIState) -> Option<BFSResult> {
+    if !ai.flight.fleeing { return None; }
+
+    let score_if_escaped = std::i32::MAX;
+    let (known, pos) = (&entity.known, entity.pos);
+    let lookup = |x| ai.flight.distances.get(&x).copied().unwrap_or(score_if_escaped);
+
+    let mut best_score = lookup(pos);
+    let mut dirs = vec![Point::default()];
+    for dir in &dirs::ALL {
+        let point = pos + *dir;
+        if known.get(point).status() != Some(Status::Free) { continue; }
+        let score = lookup(point);
+        if score < best_score { continue; }
+        if score > best_score { dirs.clear(); }
+        best_score = score;
+        dirs.push(*dir);
+    }
+
+    if best_score == score_if_escaped {
+        let targets = dirs.iter().map(|x| pos + *x).collect();
+        return Some(BFSResult { dirs, targets });
+    }
+
+    let mut best_score = -1;
+    let mut targets = vec![];
+    for (point, score) in &ai.flight.distances {
+        if *score < best_score { continue; }
+        if *score > best_score { targets.clear(); }
+        targets.push(*point);
+        best_score = *score;
+    }
+
+    Some(BFSResult { dirs, targets })
+}
+
+fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
     ai.till_hunger = max(0, ai.till_hunger - 1);
     ai.till_thirst = max(0, ai.till_thirst - 1);
 
-    let known = &entity.known;
+    let (known, pos) = (&entity.known, entity.pos);
     let mut seen = HashSet::default();
     for cell in &known.cells {
         if (ai.since - cell.since) as i32 >= 0 { break; }
@@ -857,43 +867,139 @@ fn update_ai_state(entity: &Entity, hints: &[(Goal, &'static Tile)], ai: &mut AI
         }
     }
     ai.since = known.since;
+
+    // TODO(shaunak): For now, only wild Pokemon have predator/prey relations
+    // so we can skip this whole threat() branch based on this check. However,
+    // the rest of the logic goes through if we have a more complex way to
+    // compute these threats.
+    //
+    // "rival" means that we have a hostile relationship with that entity.
+    // We'll end up with three states - Friendly, Neutral, or Rival - or more.
+    // An entity is a "threat" if its a rival and our combat analysis against
+    // it shows that we'd probably lose. These predicates can be generalized
+    // to all entities.
+    //
+    // The threshold for a rival being a threat may also depend on some other
+    // parameter like "aggressiveness". A maximally-aggressive entity will
+    // stand and fight even in hopeless situations.
+    let prey = match entity {
+        Entity::Pokemon(x) => x.data.me.species.name == "Pidgey",
+        Entity::Trainer(_) => true,
+    };
+
+    // Set up predator state in a trivial way. See caveats below about using
+    // age() here; we should switch it to "turn count" if possible.
+    if !prey {
+        ai.fight = None;
+        let mut targets = known.entities.iter().filter(
+            |x| x.rival).collect::<Vec<_>>();
+        if !targets.is_empty() {
+            targets.sort_unstable_by_key(|x| x.age);
+            let EntityKnowledge { age, pos: target, .. } = *targets[0];
+            if age < MAX_FOLLOW_TIME { ai.fight = Some(FightState { age, target }); }
+            if age == 0 { ai.plan.clear(); }
+        }
+        return;
+    }
+
+    // TODO(shaunak): We shouldn't use age() here because it means that this
+    // logic is affected by Knowledge updates in between turns.
+    //
+    // Note that our usage of age() in explore_near is similarly a problem;
+    // it's slightly better because it's either compared to entity ages (which
+    // is safe) or compared to 9999 (which is probably fine....)
+    //
+    // Ignore it for now; we don't have intermediate Knowledge updates yet.
+    //
+    // We can fix the issue by using a different age-out increment for
+    // intermediate and full updates.
+    let mut threats: Vec<_> = known.entities.iter().filter_map(
+        |x| if x.age < MAX_FLIGHT_TIME && x.rival { Some(x.pos) } else { None }).collect();
+    threats.sort_unstable_by_key(|x| (x.0, x.1));
+    if threats == ai.flight.threats { return; }
+
+    ai.plan.clear();
+    let fleeing = !threats.is_empty();
+    ai.flight = FlightState { distances: HashMap::default(), threats, fleeing };
+    if !fleeing { return; }
+
+    let check = |p: Point| {
+        if p == pos { return Status::Free; }
+        if known.get(p).unblocked() { Status::Free } else { Status::Blocked }
+    };
+    for x in &ai.flight.threats { ai.flight.distances.insert(*x, 0); }
+    DijkstraMap(check, FLIGHT_MAP_LIMIT, &mut ai.flight.distances);
 }
 
-fn plan_from_cached(entity: &Entity, ai: &mut AIState) -> Option<Action> {
+fn plan_from_cached(entity: &Entity, hints: &[Hint], ai: &mut AIState) -> Option<Action> {
     if ai.plan.is_empty() { return None; }
 
+    // Check whether we can execute the immediate next step in the plan.
     let (known, pos) = (&entity.known, entity.pos);
     let next = *ai.plan.iter().last().unwrap();
-    let dir = next - pos;
-    if dir.len_l1() != 1 { return None; }
+    let dir = next.target - pos;
+    if next.kind != StepKind::Look && dir.len_l1() > 1 { return None; }
 
+    // Check whether the plan's goal is still a top priority for us.
     let mut goals: Vec<Goal> = vec![];
-    if ai.till_hunger == 0 && ai.hints.contains_key(&Goal::Eat) {
-        goals.push(Goal::Eat);
-    }
-    if ai.till_thirst == 0 && ai.hints.contains_key(&Goal::Drink) {
-        goals.push(Goal::Drink);
+    if ai.flight.fleeing {
+        goals.push(Goal::Flee);
+    } else if ai.fight.is_some() {
+        goals.push(Goal::Chase);
+    } else {
+        if ai.till_hunger == 0 && ai.hints.contains_key(&Goal::Eat) {
+            goals.push(Goal::Eat);
+        }
+        if ai.till_thirst == 0 && ai.hints.contains_key(&Goal::Drink) {
+            goals.push(Goal::Drink);
+        }
     }
     if goals.is_empty() { goals.push(Goal::Explore); }
     if !goals.contains(&ai.goal) { return None; }
 
-    for point in &ai.plan {
-        match known.get(*point).status().unwrap_or(Status::Free) {
-            Status::Occupied => if *point == next { return None; }
-            Status::Blocked  => { return None; }
-            Status::Free     => {}
+    // Check if we got specific information that invalidates the plan.
+    let point_matches_goal = |goal: Goal, point: Point| {
+        let tile = hints.iter().find_map(
+            |x| if x.0 == goal { Some(x.1) } else { None });
+        if tile.is_none() { return false; }
+        known.get(point).tile() == tile
+    };
+    let step_valid = |Step { kind, target }| match kind {
+        StepKind::Calm => true,
+        StepKind::Drink => point_matches_goal(Goal::Drink, target),
+        StepKind::Eat => point_matches_goal(Goal::Eat, target),
+        StepKind::Look => true,
+        StepKind::Move => match known.get(target).status().unwrap_or(Status::Free) {
+            Status::Occupied => target != next.target,
+            Status::Blocked  => false,
+            Status::Free     => true,
         }
-    }
+    };
+    if !ai.plan.iter().all(|x| step_valid(*x)) { return None; }
 
+    // The plan is good! Execute the next step.
     ai.plan.pop();
-    let mut target = next;
-    for next in ai.plan.iter().rev().take(3) {
-        for point in LOS(pos, *next) {
-            if known.get(point).blocked() { break; }
+    let wait = Some(wander(Point::default()));
+    match next.kind {
+        StepKind::Calm => { ai.flight.fleeing = false; None }
+        StepKind::Drink => { ai.till_thirst = MAX_THIRST; wait }
+        StepKind::Eat => { ai.till_hunger = MAX_HUNGER; wait }
+        StepKind::Look => Some(Action::Look(next.target)),
+        StepKind::Move => {
+            let mut target = next.target;
+            for next in ai.plan.iter().rev().take(3) {
+                if next.kind == StepKind::Look { break; }
+                for point in LOS(pos, next.target) {
+                    if known.get(point).blocked() { break; }
+                }
+                target = next.target;
+            }
+            let look = if target == pos { entity.dir } else { target - pos };
+            let quick = ai.goal == Goal::Flee || ai.goal == Goal::Chase;
+            let turns = WANDER_TURNS * if quick { 0.5 } else { 1.0 };
+            Some(Action::Move(MoveData { dir, look, turns }))
         }
-        target = *next;
     }
-    Some(Action::Move(MoveData { dir, look: target - pos, turns: WANDER_TURNS }))
 }
 
 fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
@@ -903,11 +1009,10 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
         (Goal::Eat, Tile::get('%')),
     ];
     update_ai_state(pokemon, &hints, ai);
-    if let Some(x) = plan_from_cached(pokemon, ai) { return x; }
+    if let Some(x) = plan_from_cached(pokemon, &hints, ai) { return x; }
 
     ai.plan.clear();
     ai.goal = Goal::Explore;
-    pokemon.data.flight.take();
     pokemon.data.target.take();
     pokemon.data.debug.set("Recomputing plan!".into());
     let (mut dirs, mut targets) = (vec![], vec![]);
@@ -919,30 +1024,38 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
             known.get(p).status().unwrap_or(Status::Free)
         };
 
-        let mut add_candidates = |goal: Goal| {
-            if !dirs.is_empty() { return false; }
+        if let Some(x) = flee_from_threats(pokemon, ai) {
+            (dirs, targets) = (x.dirs, x.targets);
+            ai.goal = Goal::Flee;
+        } else if let Some(x) = &ai.fight {
+            if x.age == 0 {
+                ai.goal = Goal::Chase;
+                return Action::Look(x.target - pos);
+            } else if let Some(x) = explore_near(pokemon, x.target, x.age) {
+                (dirs, targets) = (x.dirs, x.targets);
+                ai.goal = Goal::Chase;
+            }
+        }
+
+        let mut add_candidates = |ai: &mut AIState, goal: Goal| {
+            if ai.goal != Goal::Explore { return; }
+
             let tile = hints.iter().find_map(
                 |x| if x.0 == goal { Some(x.1) } else { None });
-            if tile.is_none() { return false; }
+            if tile.is_none() { return; }
 
             let target = |p: Point| known.get(p).tile() == tile;
             if target(pos) {
                 (dirs, targets) = (vec![Point::default()], vec![pos]);
                 ai.goal = goal;
-                return true;
-            }
-            if let Some(result) = BFS(pos, target, BFS_LIMIT_WANDER, check) {
-                (dirs, targets) = (result.dirs, result.targets);
+            } else if let Some(x) = BFS(pos, target, BFS_LIMIT_WANDER, check) {
+                (dirs, targets) = (x.dirs, x.targets);
                 ai.goal = goal;
             }
-            return false;
         };
+        if ai.till_thirst == 0 { add_candidates(ai, Goal::Drink); }
+        if ai.till_hunger == 0 { add_candidates(ai, Goal::Eat); }
 
-        if ai.till_thirst == 0 && add_candidates(Goal::Drink) {
-            ai.till_thirst = MAX_THIRST;
-        } else if ai.till_hunger == 0 && add_candidates(Goal::Eat) {
-            ai.till_hunger = MAX_HUNGER;
-        }
         if dirs.is_empty() {
             if let Some(x) = explore_near(pokemon, pokemon.pos, 9999) {
                 (dirs, targets) = (x.dirs, x.targets);
@@ -954,25 +1067,32 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
 
     if targets.is_empty() { return fallback; }
 
-    let exploring = ai.goal == Goal::Explore;
     let mut target = *targets.select_nth_unstable_by_key(
         0, |x| (*x - pos).len_l2_squared()).1;
-    if exploring {
+    if ai.goal == Goal::Explore {
         for _ in 0..64 {
             let candidate = target + *sample(&dirs::ALL);
             if known.get(candidate).tile().is_none() { target = candidate; }
         }
     }
+    pokemon.data.target.set(targets);
 
     let check = |p: Point| {
         if p == pos { return Status::Free; }
         known.get(p).status().unwrap_or(Status::Free)
     };
-    pokemon.data.target.set(targets);
-
     if let Some(path) = AStar(pos, target, ASTAR_LIMIT_WANDER, check) {
-        ai.plan = path.into_iter().rev().collect();
-        if let Some(x) = plan_from_cached(pokemon, ai) { return x; }
+        let kind = StepKind::Move;
+        ai.plan = path.iter().map(|x| Step { kind, target: *x }).collect();
+        match ai.goal {
+            Goal::Chase => {}
+            Goal::Drink => ai.plan.push(Step { kind: StepKind::Drink, target }),
+            Goal::Eat => ai.plan.push(Step { kind: StepKind::Eat, target }),
+            Goal::Explore => {}
+            Goal::Flee => assess_threats(target, ai),
+        }
+        ai.plan.reverse();
+        if let Some(x) = plan_from_cached(pokemon, &hints, ai) { return x; }
         ai.plan.clear();
     }
     fallback
@@ -2170,23 +2290,28 @@ impl State {
         let (debug, extra) = match entity {
             Entity::Pokemon(x) => {
                 let mut ai = x.data.ai.take().unwrap_or(Box::default());
-                let plan = std::mem::replace(&mut ai.plan, vec![]);
-                let debug = format!("{:?}", ai);
-                ai.plan = plan;
-                for t in &ai.plan {
-                    let point = Point(2 * t.0, t.1);
+                let debug = {
+                    let a = std::mem::take(&mut ai.plan);
+                    let b = std::mem::take(&mut ai.flight.distances);
+                    let debug = format!("{:?}", ai);
+                    ai.flight.distances = b;
+                    ai.plan = a;
+                    debug
+                };
+                if 0 == 1 {
+                    for (point, value) in &ai.flight.distances {
+                        let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
+                        slice.set(Point(2 * point.0, point.1), Glyph::wdfg(ch, Color::gray()));
+                    }
+                }
+                for step in &ai.plan {
+                    if step.kind == StepKind::Look { continue; }
+                    let point = Point(2 * step.target.0, step.target.1);
                     let mut glyph = slice.get(point).with_fg(0x400);
                     if glyph.ch() == Glyph::wide(' ').ch() { glyph = Glyph::wdfg('.', 0x400); }
                     slice.set(point, glyph);
                 }
                 x.data.ai.set(Some(ai));
-
-                let flight = x.data.flight.take();
-                for (point, value) in &flight {
-                    let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
-                    slice.set(Point(2 * point.0, point.1), Glyph::wdfg(ch, Color::gray()));
-                }
-                x.data.flight.set(flight);
 
                 let target = x.data.target.take();
                 for t in &target {

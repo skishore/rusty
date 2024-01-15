@@ -283,7 +283,7 @@ pub fn AStar<F: Fn(Point) -> Status>(
     })();
     if free { return Some(los.into_iter().skip(1).collect()) }
 
-    let mut map: HashMap<Point, AStarNodeIndex> = HashMap::default();
+    let mut map = HashMap::default();
     let mut heap = AStarHeap::default();
 
     let score = AStarHeuristic(source, &los);
@@ -345,23 +345,16 @@ pub fn AStar<F: Fn(Point) -> Status>(
 
 // Dijkstra map
 
-pub enum DijkstraMode { Expand(i32), Update }
-
 #[allow(non_snake_case)]
 pub fn DijkstraMap<F: Fn(Point) -> Status>(
-        mode: DijkstraMode, check: F, scale: i32, result: &mut HashMap<Point, i32>) {
-    let mut map: HashMap<Point, AStarNodeIndex> = HashMap::default();
+        check: F, limit: i32, result: &mut HashMap<Point, i32>) {
+    let mut map = HashMap::default();
     let mut heap = AStarHeap::default();
 
     for (pos, val) in result.iter() {
         let node = AStarNode::new(*pos, SOURCE_NODE, 0, *val);
         map.insert(*pos, heap.push(node));
     }
-
-    let (expand, limit) = match mode {
-        DijkstraMode::Expand(x) => (true, x),
-        DijkstraMode::Update => (false, result.len() as i32),
-    };
 
     for _ in 0..limit {
         if heap.is_empty() { break; }
@@ -372,27 +365,29 @@ pub fn DijkstraMap<F: Fn(Point) -> Status>(
 
         for dir in &dirs::ALL {
             let next = prev_pos + *dir;
-            if check(next) != Status::Free { continue; }
+            let test = check(next);
+            if test == Status::Blocked { continue; }
 
-            let val = prev_val + scale;
-            let entry = map.entry(next).and_modify(|x| {
+            let diagonal = dir.0 != 0 && dir.1 != 0;
+            let occipied = test == Status::Occupied;
+            let val = prev_val + ASTAR_UNIT_COST +
+                      if diagonal { ASTAR_DIAGONAL_PENALTY } else { 0 } +
+                      if occipied { ASTAR_OCCUPIED_PENALTY } else { 0 };
+
+            map.entry(next).and_modify(|x| {
                 let existing = heap.mut_node(*x);
                 if existing.index != NOT_IN_HEAP && existing.score > val {
                     existing.score = val;
                     heap.heapify(*x);
                 }
+            }).or_insert_with(|| {
+                heap.push(AStarNode::new(next, SOURCE_NODE, 0, val))
             });
-            if expand {
-                entry.or_insert_with(|| {
-                    heap.push(AStarNode::new(next, SOURCE_NODE, 0, val))
-                });
-            }
         }
     }
 
-    for node in &heap.heap {
-        let prev_pos = heap.get_node(*node).pos;
-        let prev_val = heap.get_node(*node).score;
-        result.insert(prev_pos, prev_val);
+    for index in &heap.heap {
+        let node = heap.get_node(*index);
+        result.insert(node.pos, node.score);
     }
 }
