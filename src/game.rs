@@ -26,6 +26,9 @@ use crate::pathing::{BFS, BFSResult, Status};
 pub const MOVE_TIMER: i32 = 960;
 pub const TURN_TIMER: i32 = 120;
 
+const ATTACK_DAMAGE: i32 = 40;
+const ATTACK_RANGE: i32 = 8;
+
 const ASSESS_TIME: i32 = 17;
 const ASSESS_ANGLE: f64 = TAU / 3.;
 
@@ -605,6 +608,7 @@ pub enum Command {
 pub struct MoveData { dir: Point, look: Point, turns: f64 }
 
 pub enum Action {
+    Attack(Point),
     Idle,
     Look(Point),
     Move(MoveData),
@@ -623,6 +627,7 @@ struct ActionResult {
 impl ActionResult {
     fn failure() -> Self { Self { success: false, moves: 0., turns: 1. } }
     fn success() -> Self { Self::success_turns(1.) }
+    fn success_moves(moves: f64) -> Self { Self { success: true,  moves, turns: 1. } }
     fn success_turns(turns: f64) -> Self { Self { success: true,  moves: 0., turns } }
 }
 
@@ -787,6 +792,20 @@ fn explore_near(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> {
     BFS(source, done1, BFS_LIMIT_WANDER, check))
 }
 
+fn attack_target(entity: &Entity, target: Point) -> Action {
+    let (known, source) = (&*entity.known, entity.pos);
+    if source == target { return Action::Idle; }
+
+    let range = ATTACK_RANGE;
+    let valid = |x| has_line_of_sight(x, target, known, range);
+    if !valid(source) {
+        return path_to_target(entity, target, known, range, valid);
+    } else if !move_ready(entity) {
+        return Action::Look(target - source);
+    }
+    Action::Attack(target)
+}
+
 fn assess_threats(source: Point, ai: &mut AIState) {
     if !ai.flight.fleeing { return; }
 
@@ -820,7 +839,7 @@ fn flee_from_threats(entity: &Entity, ai: &mut AIState) -> Option<BFSResult> {
     if !ai.flight.fleeing { return None; }
 
     let score_if_escaped = std::i32::MAX;
-    let (known, pos) = (&entity.known, entity.pos);
+    let (known, pos) = (&*entity.known, entity.pos);
     let lookup = |x| ai.flight.distances.get(&x).copied().unwrap_or(score_if_escaped);
 
     let mut best_score = lookup(pos);
@@ -856,7 +875,7 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
     ai.till_hunger = max(0, ai.till_hunger - 1);
     ai.till_thirst = max(0, ai.till_thirst - 1);
 
-    let (known, pos) = (&entity.known, entity.pos);
+    let (known, pos) = (&*entity.known, entity.pos);
     let mut seen = HashSet::default();
     for cell in &known.cells {
         if (ai.since - cell.since) as i32 >= 0 { break; }
@@ -935,7 +954,7 @@ fn plan_from_cached(entity: &Entity, hints: &[Hint], ai: &mut AIState) -> Option
     if ai.plan.is_empty() { return None; }
 
     // Check whether we can execute the immediate next step in the plan.
-    let (known, pos) = (&entity.known, entity.pos);
+    let (known, pos) = (&*entity.known, entity.pos);
     let next = *ai.plan.iter().last().unwrap();
     let dir = next.target - pos;
     if next.kind != StepKind::Look && dir.len_l1() > 1 { return None; }
@@ -1030,7 +1049,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
         } else if let Some(x) = &ai.fight {
             if x.age == 0 {
                 ai.goal = Goal::Chase;
-                return Action::Look(x.target - pos);
+                return attack_target(pokemon, x.target);
             } else if let Some(x) = explore_near(pokemon, x.target, x.age) {
                 (dirs, targets) = (x.dirs, x.targets);
                 ai.goal = Goal::Chase;
@@ -1200,17 +1219,22 @@ fn path_to_target<F: Fn(Point) -> bool>(
     let mut dirs = result.map(|x| x.dirs).unwrap_or_default();
     if valid(source) { dirs.push(Point::default()); }
 
+    let step = |dir: Point| {
+        let look = target - source - dir;
+        Action::Move(MoveData { dir, look, turns: 1. })
+    };
+
     if !dirs.is_empty() {
         let scores: Vec<_> = dirs.iter().map(
             |x| ((*x + source - target).len_nethack() - range).abs()).collect();
         let best = *scores.iter().reduce(|acc, x| min(acc, x)).unwrap();
         let opts: Vec<_> = dirs.iter().enumerate().filter(|(i, _)| scores[*i] == best).collect();
-        return step(*sample(&opts).1, 1.);
+        return step(*sample(&opts).1);
     }
 
     let path = AStar(source, target, ASTAR_LIMIT_ATTACK, check);
     let dir = path.and_then(|x| if x.is_empty() { None } else { Some(x[0] - source) });
-    step(dir.unwrap_or_else(|| *sample(&dirs::ALL)), 1.)
+    step(dir.unwrap_or_else(|| *sample(&dirs::ALL)))
 }
 
 fn defend_leader(pokemon: &Pokemon, trainer: &Trainer) -> Option<Action> {
@@ -1284,7 +1308,7 @@ fn plan(board: &Board, eid: EID, input: &mut Action) -> Action {
             let mut commands = summon.data.commands.take();
             let mut result = None;
             if let Some(Command::Return) = commands.iter().next() &&
-               has_line_of_sight(entity.pos, summon.pos, &entity.known, SUMMON_RANGE) {
+               has_line_of_sight(entity.pos, summon.pos, &*entity.known, SUMMON_RANGE) {
                 result = Some(Action::Withdraw(summon.id()));
                 commands.remove(0);
             }
@@ -1304,6 +1328,24 @@ fn plan(board: &Board, eid: EID, input: &mut Action) -> Action {
 // Apply an Action to our state
 
 type CB = Box<dyn Fn(&mut Board)>;
+
+fn apply_damage(board: &Board, target: Point, callback: CB) -> Effect {
+    let eid = match board.get_entity_at(target) {
+        None => return Effect::default(),
+        Some(x) => x,
+    };
+
+    let glyph = board.entities[eid].glyph;
+    let flash = glyph.with_fg(Color::black()).with_bg(0x400);
+    let particle = effect::Particle { glyph: flash, point: target };
+    let mut effect = Effect::serial(vec![
+        Effect::constant(particle, UI_DAMAGE_FLASH),
+        Effect::pause(UI_DAMAGE_TICKS),
+    ]);
+    let frame = effect.frames.len() as i32;
+    effect.add_event(Event::Callback { frame, callback });
+    effect
+}
 
 fn apply_effect(mut effect: Effect, what: FT, callback: CB) -> Effect {
     let frame = effect.events.iter().find_map(
@@ -1336,7 +1378,9 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             if dir == Point::default() {
                 return ActionResult::success_turns(turns);
             }
-            state.board.entities[eid].dir = look;
+            if look != Point::default() {
+                state.board.entities[eid].dir = look;
+            }
             let entity = &state.board.entities[eid];
             let (source, target) = (entity.pos, entity.pos + dir);
             match state.board.get_status(target) {
@@ -1387,6 +1431,38 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             let pokemon = &mut state.board.entities[pid];
             pokemon.data.commands.get_mut().push(command);
             ActionResult::success()
+        }
+        Action::Attack(target) => {
+            let pokemon = match &state.board.entities[eid] {
+                Entity::Pokemon(x) => x,
+                _ => return ActionResult::failure(),
+            };
+            let (known, source) = (&pokemon.known, pokemon.pos);
+            if !has_line_of_sight(source, target, known, ATTACK_RANGE) {
+                return ActionResult::failure();
+            }
+            let oid = state.board.get_entity_at(target);
+            let cb = move |board: &mut Board| {
+                let oid = if let Some(x) = oid { x } else { return; };
+                let other = &mut board.entities[oid];
+                other.dir = source - target;
+                let removed = match other {
+                    Entity::Pokemon(x) => {
+                        let damage = random::<i32>().rem_euclid(ATTACK_DAMAGE);
+                        x.data.me.cur_hp = max(0, x.data.me.cur_hp - damage);
+                        x.data.me.cur_hp == 0
+                    }
+                    Entity::Trainer(x) => {
+                        x.data.cur_hp = max(0, x.data.cur_hp - 1);
+                        x.data.cur_hp == 0
+                    }
+                };
+                let cb = move |board: &mut Board| if removed { board.remove_entity(oid); };
+                board.add_effect(apply_damage(board, target, Box::new(cb)));
+            };
+            let effect = effect::HeadbuttEffect(&state.board, source, target);
+            state.board.add_effect(apply_effect(effect, FT::Hit, Box::new(cb)));
+            ActionResult::success_moves(1.)
         }
         Action::Summon(index, target) => {
             let trainer = match &state.board.entities[eid] {
@@ -1749,6 +1825,9 @@ const UI_MAP_SIZE_Y: i32 = WORLD_SIZE;
 const UI_CHOICE_SIZE: i32 = 40;
 const UI_STATUS_SIZE: i32 = 30;
 const UI_COLOR: i32 = 0x430;
+
+const UI_DAMAGE_FLASH: i32 = 6;
+const UI_DAMAGE_TICKS: i32 = 6;
 
 const UI_TARGET_FRAMES: i32 = 20;
 
@@ -2254,14 +2333,14 @@ impl State {
         let options = ["Pidgey", "Ratatta"];
         for i in 0..20 {
             if let Some(pos) = pos(&board) {
-                let index = if i % 4 == 0 { 1 } else { 0 };
+                let index = if i % 20 == 0 { 1 } else { 0 };
                 let (dir, species) = (*sample(&dirs::ALL), options[index]);
                 board.add_pokemon(&PokemonArgs { pos, dir, species });
             }
         }
         board.update_known(tid.eid());
 
-        let point_of_view = Some(board.entity_order[2]);
+        let point_of_view = Some(board.entity_order[1]);
 
         Self {
             board,
@@ -2329,6 +2408,7 @@ impl State {
                         }
                     }
                     for step in &ai.plan {
+                        if frame.is_some() { continue; }
                         if step.kind == StepKind::Look { continue; }
                         let point = Point(2 * step.target.0, step.target.1);
                         let mut glyph = slice.get(point).with_fg(0x400);
@@ -2339,6 +2419,7 @@ impl State {
 
                     let target = x.data.target.take();
                     for t in &target {
+                        if frame.is_some() { continue; }
                         let point = Point(2 * t.0, t.1);
                         let glyph = slice.get(point).with_fg(Color::black()).with_bg(0x400);
                         slice.set(point, glyph);
@@ -2357,6 +2438,7 @@ impl State {
                 slice.set(point, other.glyph);
             }
             for other in &entity.known.entities {
+                if frame.is_some() { continue; }
                 let color = if other.age == 0 { 0x040 } else {
                     if other.moved { 0x400 } else { 0x440 }
                 };
@@ -2364,6 +2446,11 @@ impl State {
                 let point = Point(2 * other.pos.0, other.pos.1);
                 slice.set(point, glyph);
             };
+            if let Some(frame) = frame {
+                for effect::Particle { point, glyph } in frame {
+                    slice.set(Point(2 * point.0, point.1), *glyph);
+                }
+            }
             let slice = &mut Slice::new(buffer, self.ui.log);
             slice.write_str(&debug).newline().write_str(&extra);
             return;
