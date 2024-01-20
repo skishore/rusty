@@ -803,6 +803,7 @@ fn attack_target(entity: &Entity, target: Point) -> Action {
     } else if !move_ready(entity) {
         return Action::Look(target - source);
     }
+    if 1 == 1 { return Action::Look(target - source); }
     Action::Attack(target)
 }
 
