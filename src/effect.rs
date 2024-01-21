@@ -1,4 +1,4 @@
-use crate::base::{Color, HashSet, Glyph, LOS, Point, dirs, sample};
+use crate::base::{Color, HashSet, Glyph, LOS, Point, RNG, dirs, sample};
 use crate::game::Board;
 
 //////////////////////////////////////////////////////////////////////////////
@@ -9,7 +9,7 @@ use crate::game::Board;
 pub enum FT { Fire, Ice, Hit, Summon, Withdraw }
 
 pub enum Event {
-    Callback { frame: i32, callback: Box<dyn Fn(&mut Board)> },
+    Callback { frame: i32, callback: Box<dyn Fn(&mut Board, &mut RNG)> },
     Other { frame: i32, point: Point, what: FT },
 }
 
@@ -302,7 +302,7 @@ fn SwitchEffect(source: Point, target: Point) -> Effect {
 }
 
 #[allow(non_snake_case)]
-pub fn EmberEffect(_: &Board, source: Point, target: Point) -> Effect {
+pub fn EmberEffect(_: &Board, _: &mut RNG, source: Point, target: Point) -> Effect {
     let mut effect = Effect::default();
     let line = LOS(source, target);
 
@@ -339,7 +339,7 @@ pub fn EmberEffect(_: &Board, source: Point, target: Point) -> Effect {
 }
 
 #[allow(non_snake_case)]
-pub fn IceBeamEffect(_: &Board, source: Point, target: Point) -> Effect {
+pub fn IceBeamEffect(_: &Board, _: &mut RNG, source: Point, target: Point) -> Effect {
     let mut effect = Effect::default();
     let line = LOS(source, target);
     let ray = ray_character(source, target).to_string();
@@ -371,14 +371,14 @@ pub fn IceBeamEffect(_: &Board, source: Point, target: Point) -> Effect {
 }
 
 #[allow(non_snake_case)]
-pub fn BlizzardEffect(_: &Board, source: Point, target: Point) -> Effect {
+pub fn BlizzardEffect(_: &Board, rng: &mut RNG, source: Point, target: Point) -> Effect {
     let mut effect = Effect::default();
     let ray = ray_character(source, target).to_string();
 
     let mut points = vec![target];
     let mut used = HashSet::default();
     while points.len() < 3 {
-        let alt = target + *sample(&dirs::ALL);
+        let alt = target + *sample(&dirs::ALL, rng);
         if !used.insert(alt) { continue; }
         points.push(alt);
     }
@@ -414,7 +414,7 @@ pub fn BlizzardEffect(_: &Board, source: Point, target: Point) -> Effect {
 }
 
 #[allow(non_snake_case)]
-pub fn HeadbuttEffect(board: &Board, source: Point, target: Point) -> Effect {
+pub fn HeadbuttEffect(board: &Board, _: &mut RNG, source: Point, target: Point) -> Effect {
     let glyph = get_glyph_at(board, source);
     let underlying = get_underlying_glyph_at(board, source);
 

@@ -3,12 +3,12 @@ use std::f64::consts::TAU;
 use std::ops::{Deref, DerefMut};
 
 use lazy_static::lazy_static;
-use rand::random;
+use rand::{Rng, SeedableRng};
 
 use crate::{cast, static_assert_size};
 use crate::base::{Buffer, Color, Glyph, Slice};
 use crate::base::{HashMap, HashSet, LOS, Matrix, Point, Rect, dirs};
-use crate::base::{sample, weighted};
+use crate::base::{sample, weighted, RNG};
 use crate::effect::{Effect, Event, Frame, FT, ray_character, self};
 use crate::entity::{EID, PID, TID, EntityMap, EntityMapKey};
 use crate::entity::{Entity, Pokemon, Trainer};
@@ -198,34 +198,34 @@ impl Board {
 
     // Writes
 
-    fn add_effect(&mut self, effect: Effect) {
+    fn add_effect(&mut self, effect: Effect, rng: &mut RNG) {
         let mut existing = Effect::default();
         std::mem::swap(&mut self._effect, &mut existing);
         self._effect = existing.and(effect);
-        self._execute_effect_callbacks();
+        self._execute_effect_callbacks(rng);
     }
 
-    fn advance_effect(&mut self) -> bool {
+    fn advance_effect(&mut self, rng: &mut RNG) -> bool {
         if self._effect.frames.is_empty() {
             assert!(self._effect.events.is_empty());
             return false;
         }
         self._effect.frames.remove(0);
         self._effect.events.iter_mut().for_each(|x| x.update_frame(|y| y - 1));
-        self._execute_effect_callbacks();
+        self._execute_effect_callbacks(rng);
         true
     }
 
-    fn _execute_effect_callbacks(&mut self) {
-        while self._execute_one_effect_callback() {}
+    fn _execute_effect_callbacks(&mut self, rng: &mut RNG) {
+        while self._execute_one_effect_callback(rng) {}
     }
 
-    fn _execute_one_effect_callback(&mut self) -> bool {
+    fn _execute_one_effect_callback(&mut self, rng: &mut RNG) -> bool {
         if self._effect.events.is_empty() { return false; }
         let event = &self._effect.events[0];
         if !self._effect.frames.is_empty() && event.frame() > 0 { return false; }
         match self._effect.events.remove(0) {
-            Event::Callback { callback, .. } => callback(self),
+            Event::Callback { callback, .. } => callback(self, rng),
             Event::Other { .. } => (),
         }
         true
@@ -392,7 +392,7 @@ impl Board {
 
 // Map generation
 
-fn mapgen(board: &mut Board) {
+fn mapgen(board: &mut Board, rng: &mut RNG) {
     let ft = Tile::get('.');
     let wt = Tile::get('#');
     let gt = Tile::get('"');
@@ -400,10 +400,10 @@ fn mapgen(board: &mut Board) {
     let wa = Tile::get('~');
 
     board.fill_map(ft);
-    let d100 = || random::<u32>() % 100;
     let size = board.get_size();
 
-    let automata = || -> Matrix<bool> {
+    let automata = |rng: &mut RNG| -> Matrix<bool> {
+        let mut d100 = || rng.gen::<u32>() % 100;
         let mut result = Matrix::new(size, false);
         for x in 0..size.0 {
             result.set(Point(x, 0), true);
@@ -446,8 +446,8 @@ fn mapgen(board: &mut Board) {
         result
     };
 
-    let walls = automata();
-    let grass = automata();
+    let walls = automata(rng);
+    let grass = automata(rng);
     for y in 0..size.1 {
         for x in 0..size.0 {
             let point = Point(x, y);
@@ -459,25 +459,25 @@ fn mapgen(board: &mut Board) {
         }
     }
 
-    let rng = |n: i32| random::<i32>().rem_euclid(n);
+    let die = |n: i32, rng: &mut RNG| rng.gen::<i32>().rem_euclid(n);
     let mut river = vec![Point::default()];
     for i in 1..size.1 {
         let last = river.iter().last().unwrap().0;
-        let next = last + rng(3) - 1;
+        let next = last + die(3, rng) - 1;
         river.push(Point(next, i));
     }
     let target = river[0] + *river.iter().last().unwrap();
     let offset = Point((size - target).0 / 2, 0);
     for x in &river { board.set_tile_at(*x + offset, wa); }
 
-    let pos = |board: &Board| {
+    let pos = |board: &Board, rng: &mut RNG| {
         for _ in 0..100 {
-            let p = Point(rng(size.0), rng(size.1));
+            let p = Point(die(size.0, rng), die(size.1, rng));
             if let Status::Free = board.get_status(p) { return Some(p); }
         }
         None
     };
-    for _ in 0..5 { if let Some(pos) = pos(board) { board.set_tile_at(pos, fl); } }
+    for _ in 0..5 { if let Some(pos) = pos(board, rng) { board.set_tile_at(pos, fl); } }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -747,8 +747,8 @@ pub struct AIState {
 const MAX_HUNGER: i32 = 256;
 const MAX_THIRST: i32 = 64;
 
-impl Default for AIState {
-    fn default() -> Self {
+impl AIState {
+    fn new(rng: &mut RNG) -> Self {
         Self {
             goal: Goal::Explore,
             plan: vec![],
@@ -756,8 +756,8 @@ impl Default for AIState {
             hints: HashMap::default(),
             fight: None,
             flight: FlightState::default(),
-            till_hunger: random::<i32>().rem_euclid(MAX_HUNGER),
-            till_thirst: random::<i32>().rem_euclid(MAX_THIRST),
+            till_hunger: rng.gen::<i32>().rem_euclid(MAX_HUNGER),
+            till_thirst: rng.gen::<i32>().rem_euclid(MAX_THIRST),
         }
     }
 }
@@ -792,14 +792,14 @@ fn explore_near(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> {
     BFS(source, done1, BFS_LIMIT_WANDER, check))
 }
 
-fn attack_target(entity: &Entity, target: Point) -> Action {
+fn attack_target(entity: &Entity, target: Point, rng: &mut RNG) -> Action {
     let (known, source) = (&*entity.known, entity.pos);
     if source == target { return Action::Idle; }
 
     let range = ATTACK_RANGE;
     let valid = |x| has_line_of_sight(x, target, known, range);
     if !valid(source) {
-        return path_to_target(entity, target, known, range, valid);
+        return path_to_target(entity, target, known, range, valid, rng);
     } else if !move_ready(entity) {
         return Action::Look(target - source);
     }
@@ -1022,7 +1022,7 @@ fn plan_from_cached(entity: &Entity, hints: &[Hint], ai: &mut AIState) -> Option
     }
 }
 
-fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
+fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action {
     pokemon.data.debug.take();
     let hints = [
         (Goal::Drink, Tile::get('~')),
@@ -1050,7 +1050,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
         } else if let Some(x) = &ai.fight {
             if x.age == 0 {
                 ai.goal = Goal::Chase;
-                return attack_target(pokemon, x.target);
+                return attack_target(pokemon, x.target, rng);
             } else if let Some(x) = explore_near(pokemon, x.target, x.age) {
                 (dirs, targets) = (x.dirs, x.targets);
                 ai.goal = Goal::Chase;
@@ -1081,8 +1081,8 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
                 (dirs, targets) = (x.dirs, x.targets);
             }
         }
-        if dirs.is_empty() { return wander(*sample(&dirs::ALL)); }
-        wander(*sample(&dirs))
+        if dirs.is_empty() { return wander(*sample(&dirs::ALL, rng)); }
+        wander(*sample(&dirs, rng))
     };
 
     if targets.is_empty() { return fallback; }
@@ -1091,7 +1091,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
         0, |x| (*x - pos).len_l2_squared()).1;
     if ai.goal == Goal::Explore {
         for _ in 0..64 {
-            let candidate = target + *sample(&dirs::ALL);
+            let candidate = target + *sample(&dirs::ALL, rng);
             if known.get(candidate).tile().is_none() { target = candidate; }
         }
     }
@@ -1118,9 +1118,9 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState) -> Action {
     fallback
 }
 
-fn plan_wild_pokemon(pokemon: &Pokemon) -> Action {
-    let mut ai = pokemon.data.ai.take().unwrap_or(Box::default());
-    let result = plan_from_state(pokemon, &mut ai);
+fn plan_wild_pokemon(pokemon: &Pokemon, rng: &mut RNG) -> Action {
+    let mut ai = pokemon.data.ai.take().unwrap_or(Box::new(AIState::new(rng)));
+    let result = plan_from_state(pokemon, &mut ai, rng);
     pokemon.data.ai.set(Some(ai));
     result
 }
@@ -1210,7 +1210,8 @@ fn has_line_of_sight(source: Point, target: Point, known: &Knowledge, range: i32
 }
 
 fn path_to_target<F: Fn(Point) -> bool>(
-        entity: &Entity, target: Point, known: &Knowledge, range: i32, valid: F) -> Action {
+        entity: &Entity, target: Point, known: &Knowledge,
+        range: i32, valid: F, rng: &mut RNG) -> Action {
     let check = |p: Point| {
         if p == entity.pos { return Status::Free; }
         known.get(p).status().unwrap_or(Status::Free)
@@ -1230,12 +1231,12 @@ fn path_to_target<F: Fn(Point) -> bool>(
             |x| ((*x + source - target).len_nethack() - range).abs()).collect();
         let best = *scores.iter().reduce(|acc, x| min(acc, x)).unwrap();
         let opts: Vec<_> = dirs.iter().enumerate().filter(|(i, _)| scores[*i] == best).collect();
-        return step(*sample(&opts).1);
+        return step(*sample(&opts, rng).1);
     }
 
     let path = AStar(source, target, ASTAR_LIMIT_ATTACK, check);
     let dir = path.and_then(|x| if x.is_empty() { None } else { Some(x[0] - source) });
-    step(dir.unwrap_or_else(|| *sample(&dirs::ALL)))
+    step(dir.unwrap_or_else(|| *sample(&dirs::ALL, rng)))
 }
 
 fn defend_leader(pokemon: &Pokemon, trainer: &Trainer) -> Option<Action> {
@@ -1248,19 +1249,20 @@ fn defend_leader(pokemon: &Pokemon, trainer: &Trainer) -> Option<Action> {
     Some(step(path[0] - pokemon.pos, 1.))
 }
 
-fn follow_command(pokemon: &Pokemon, trainer: &Trainer, command: &Command) -> Action {
+fn follow_command(pokemon: &Pokemon, trainer: &Trainer,
+                  command: &Command, rng: &mut RNG) -> Action {
     // TODO(shaunak): Combine our knowledge and our leader's here.
     let known = &*trainer.known;
     match command {
         Command::Return => {
             let range = SUMMON_RANGE;
             let valid = |x| has_line_of_sight(trainer.pos, x, known, range);
-            path_to_target(pokemon, trainer.pos, known, range, valid)
+            path_to_target(pokemon, trainer.pos, known, range, valid, rng)
         }
     }
 }
 
-fn follow_leader(pokemon: &Pokemon, trainer: &Trainer) -> Action {
+fn follow_leader(pokemon: &Pokemon, trainer: &Trainer, rng: &mut RNG) -> Action {
     // TODO(shaunak): Combine our knowledge and our leader's here.
     let known = &*trainer.known;
     let (pp, tp) = (pokemon.pos, trainer.pos);
@@ -1270,38 +1272,38 @@ fn follow_leader(pokemon: &Pokemon, trainer: &Trainer) -> Action {
         let mut moves: Vec<_> = dirs::ALL.iter().filter_map(
             |x| if okay(pp + *x) { Some((1, *x)) } else { None }).collect();
         if okay(pp) { moves.push((16, Point::default())); }
-        if !moves.is_empty() { return step(*weighted(&moves), 1.); }
+        if !moves.is_empty() { return step(*weighted(&moves, rng), 1.); }
     }
 
     let check = |p: Point| known.get(p).status().unwrap_or(Status::Occupied);
     let path = AStar(pp, tp, ASTAR_LIMIT_ATTACK, check).unwrap_or_default();
-    let dir = if !path.is_empty() { path[0] - pp } else { *sample(&dirs::ALL) };
+    let dir = if !path.is_empty() { path[0] - pp } else { *sample(&dirs::ALL, rng) };
     step(dir, 1.)
 }
 
-fn plan_pokemon(board: &Board, pokemon: &Pokemon) -> Action {
+fn plan_pokemon(board: &Board, pokemon: &Pokemon, rng: &mut RNG) -> Action {
     let trainer = match pokemon.data.me.trainer {
         Some(tid) => &board.entities[tid],
-        None => return plan_wild_pokemon(pokemon),
+        None => return plan_wild_pokemon(pokemon, rng),
     };
 
     let commands = pokemon.data.commands.take();
     while !commands.is_empty() {
-        let action = follow_command(pokemon, trainer, &commands[0]);
+        let action = follow_command(pokemon, trainer, &commands[0], rng);
         pokemon.data.commands.set(commands);
         return action;
     }
-    if 1 == 1 { return plan_wild_pokemon(pokemon); }
+    if 1 == 1 { return plan_wild_pokemon(pokemon, rng); }
 
     //let ready = move_ready(pokemon);
     //if !ready && let Some(x) = defend_leader(pokemon, trainer) { return x;  }
     // (use attacks here!)
     //if ready && let Some(x) = defend_leader(pokemon, trainer) { return x;  }
     if let Some(x) = defend_leader(pokemon, trainer) { return x; }
-    follow_leader(pokemon, trainer)
+    follow_leader(pokemon, trainer, rng)
 }
 
-fn plan(board: &Board, eid: EID, input: &mut Action) -> Action {
+fn plan(board: &Board, eid: EID, input: &mut Action, rng: &mut RNG) -> Action {
     let entity = &board.entities[eid];
     if entity.player {
         for pid in &cast!(entity, Entity::Trainer).data.summons {
@@ -1319,7 +1321,7 @@ fn plan(board: &Board, eid: EID, input: &mut Action) -> Action {
         return std::mem::replace(input, Action::WaitForInput);
     }
     match entity {
-        Entity::Pokemon(x) => plan_pokemon(board, x),
+        Entity::Pokemon(x) => plan_pokemon(board, x, rng),
         Entity::Trainer(_) => Action::Idle,
     }
 }
@@ -1328,7 +1330,7 @@ fn plan(board: &Board, eid: EID, input: &mut Action) -> Action {
 
 // Apply an Action to our state
 
-type CB = Box<dyn Fn(&mut Board)>;
+type CB = Box<dyn Fn(&mut Board, &mut RNG)>;
 
 fn apply_damage(board: &Board, target: Point, callback: CB) -> Effect {
     let eid = match board.get_entity_at(target) {
@@ -1424,8 +1426,8 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             if matches!(command, Command::Return) &&
                has_line_of_sight(source, target, &trainer.known, SUMMON_RANGE) {
                 shout(&mut state.board, tid, &format!("{}, return!", name));
-                let cb = move |board: &mut Board| board.remove_entity(pid.eid());
-                state.board.add_effect(apply_withdraw(source, target, Box::new(cb)));
+                let cb = move |board: &mut Board, _: &mut RNG| board.remove_entity(pid.eid());
+                state.add_effect(apply_withdraw(source, target, Box::new(cb)));
                 return ActionResult::success();
             }
             shout(&mut state.board, tid, &format!("{}, return!", name));
@@ -1443,13 +1445,13 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 return ActionResult::failure();
             }
             let oid = state.board.get_entity_at(target);
-            let cb = move |board: &mut Board| {
+            let cb = move |board: &mut Board, rng: &mut RNG| {
                 let oid = if let Some(x) = oid { x } else { return; };
                 let other = &mut board.entities[oid];
                 other.dir = source - target;
                 let removed = match other {
                     Entity::Pokemon(x) => {
-                        let damage = random::<i32>().rem_euclid(ATTACK_DAMAGE);
+                        let damage = rng.gen::<i32>().rem_euclid(ATTACK_DAMAGE);
                         x.data.me.cur_hp = max(0, x.data.me.cur_hp - damage);
                         x.data.me.cur_hp == 0
                     }
@@ -1458,11 +1460,13 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                         x.data.cur_hp == 0
                     }
                 };
-                let cb = move |board: &mut Board| if removed { board.remove_entity(oid); };
-                board.add_effect(apply_damage(board, target, Box::new(cb)));
+                let cb = move |board: &mut Board, _: &mut RNG| {
+                    if removed { board.remove_entity(oid); };
+                };
+                board.add_effect(apply_damage(board, target, Box::new(cb)), rng);
             };
-            let effect = effect::HeadbuttEffect(&state.board, source, target);
-            state.board.add_effect(apply_effect(effect, FT::Hit, Box::new(cb)));
+            let effect = effect::HeadbuttEffect(&state.board, &mut state.rng, source, target);
+            state.add_effect(apply_effect(effect, FT::Hit, Box::new(cb)));
             ActionResult::success_moves(1.)
         }
         Action::Summon(index, target) => {
@@ -1480,7 +1484,7 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             }
 
             shout(&mut state.board, tid, &format!("Go! {}!", name));
-            let cb = move |board: &mut Board| {
+            let cb = move |board: &mut Board, _: &mut RNG| {
                 let trainer = &mut board.entities[tid];
                 let me = cast!(trainer.data.pokemon.remove(index), PokemonEdge::In);
                 let dir = target - trainer.pos;
@@ -1490,7 +1494,7 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 trainer.data.pokemon.insert(index, PokemonEdge::Out(pid));
                 trainer.data.summons.push(pid);
             };
-            state.board.add_effect(apply_summon(source, target, Box::new(cb)));
+            state.add_effect(apply_summon(source, target, Box::new(cb)));
             ActionResult::success()
         }
         Action::Withdraw(pid) => {
@@ -1513,8 +1517,8 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 format!("{} withdraws {}.", trainer.data.name, name)
             };
             state.board.log_color(message, 0x234);
-            let cb = move |board: &mut Board| board.remove_entity(pid.eid());
-            state.board.add_effect(apply_withdraw(source, target, Box::new(cb)));
+            let cb = move |board: &mut Board, _: &mut RNG| board.remove_entity(pid.eid());
+            state.add_effect(apply_withdraw(source, target, Box::new(cb)));
             ActionResult::success()
         }
     }
@@ -1750,7 +1754,7 @@ fn update_focus(state: &mut State) {
 }
 
 fn update_state(state: &mut State) {
-    if state.board.advance_effect() {
+    if state.board.advance_effect(&mut state.rng) {
         state.board.update_known(state.player.eid());
         return;
     }
@@ -1795,7 +1799,7 @@ fn update_state(state: &mut State) {
         if let Some(x) = tid { state.board.update_known(x.eid()); }
 
         let player = eid == state.player.eid();
-        let action = plan(&state.board, eid, &mut state.input);
+        let action = plan(&state.board, eid, &mut state.input, &mut state.rng);
         let result = act(state, eid, action);
         update = true;
 
@@ -2299,17 +2303,20 @@ pub struct State {
     point_of_view: Option<EID>,
     player: TID,
     menu: Option<Menu>,
+    rng: RNG,
     ui: UI,
 }
 
 impl State {
-    pub fn new() -> Self {
+    pub fn new(seed: Option<u64>) -> Self {
         let size = Point(WORLD_SIZE, WORLD_SIZE);
-        let mut board = Board::new(size);
         let pos = Point(size.0 / 2, size.1 / 2);
+        let rng = seed.map(|x| RNG::seed_from_u64(x));
+        let mut rng = rng.unwrap_or_else(|| RNG::from_entropy());
+        let mut board = Board::new(size);
 
         loop {
-            mapgen(&mut board);
+            mapgen(&mut board, &mut rng);
             if !board.get_tile_at(pos).blocked() { break; }
         }
 
@@ -2323,19 +2330,19 @@ impl State {
         player.register_pokemon("Eevee");
         player.register_pokemon("Pikachu");
 
-        let rng = |n: i32| random::<i32>().rem_euclid(n);
-        let pos = |board: &Board| {
+        let die = |n: i32, rng: &mut RNG| rng.gen::<i32>().rem_euclid(n);
+        let pos = |board: &Board, rng: &mut RNG| {
             for _ in 0..100 {
-                let p = Point(rng(size.0), rng(size.1));
+                let p = Point(die(size.0, rng), die(size.1, rng));
                 if let Status::Free = board.get_status(p) { return Some(p); }
             }
             None
         };
         let options = ["Pidgey", "Ratatta"];
         for i in 0..20 {
-            if let Some(pos) = pos(&board) {
+            if let Some(pos) = pos(&board, &mut rng) {
                 let index = if i % 20 == 0 { 1 } else { 0 };
-                let (dir, species) = (*sample(&dirs::ALL), options[index]);
+                let (dir, species) = (*sample(&dirs::ALL, &mut rng), options[index]);
                 board.add_pokemon(&PokemonArgs { pos, dir, species });
             }
         }
@@ -2357,8 +2364,11 @@ impl State {
             point_of_view,
             player: tid,
             menu: None,
+            rng,
         }
     }
+
+    pub fn add_effect(&mut self, x: Effect) { self.board.add_effect(x, &mut self.rng) }
 
     pub fn add_input(&mut self, input: Input) { self.inputs.push(input) }
 
@@ -2391,47 +2401,48 @@ impl State {
         });
         if let Some(entity) = entity {
             self.ui.render_map(entity, frame, Point::default(), None, slice);
-            let (debug, extra) = match entity {
-                Entity::Pokemon(x) => {
-                    let mut ai = x.data.ai.take().unwrap_or(Box::default());
-                    let debug = {
-                        let a = std::mem::take(&mut ai.plan);
-                        let b = std::mem::take(&mut ai.flight.distances);
-                        let debug = format!("{:?}", ai);
-                        ai.flight.distances = b;
-                        ai.plan = a;
-                        debug
-                    };
-                    if 0 == 1 {
-                        for (point, value) in &ai.flight.distances {
-                            let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
-                            slice.set(Point(2 * point.0, point.1), Glyph::wdfg(ch, Color::gray()));
-                        }
-                    }
-                    for step in &ai.plan {
-                        if frame.is_some() { continue; }
-                        if step.kind == StepKind::Look { continue; }
-                        let point = Point(2 * step.target.0, step.target.1);
-                        let mut glyph = slice.get(point).with_fg(0x400);
-                        if glyph.ch() == Glyph::wide(' ').ch() { glyph = Glyph::wdfg('.', 0x400); }
-                        slice.set(point, glyph);
-                    }
-                    x.data.ai.set(Some(ai));
+            let (debug, extra) = if let Entity::Pokemon(x) = entity &&
+                                    let Some(mut ai) = x.data.ai.take() {
+                let debug = {
+                    let a = std::mem::take(&mut ai.plan);
+                    let b = std::mem::take(&mut ai.flight.distances);
+                    let debug = format!("{:?}", ai);
+                    ai.flight.distances = b;
+                    ai.plan = a;
+                    debug
+                };
 
-                    let target = x.data.target.take();
-                    for t in &target {
-                        if frame.is_some() { continue; }
-                        let point = Point(2 * t.0, t.1);
-                        let glyph = slice.get(point).with_fg(Color::black()).with_bg(0x400);
-                        slice.set(point, glyph);
+                if 1 == 1 {
+                    for (point, value) in &ai.flight.distances {
+                        let point = Point(2 * point.0, point.1);
+                        let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
+                        slice.set(point, Glyph::wdfg(ch, slice.get(point).fg()));
                     }
-                    x.data.target.set(target);
-
-                    let extra = x.data.debug.take();
-                    x.data.debug.set(extra.clone());
-                    (debug, extra)
                 }
-                Entity::Trainer(_) => ("<none>".into(), "".into()),
+                for step in &ai.plan {
+                    if frame.is_some() { continue; }
+                    if step.kind == StepKind::Look { continue; }
+                    let point = Point(2 * step.target.0, step.target.1);
+                    let mut glyph = slice.get(point).with_fg(0x400);
+                    if glyph.ch() == Glyph::wide(' ').ch() { glyph = Glyph::wdfg('.', 0x400); }
+                    slice.set(point, glyph);
+                }
+                x.data.ai.set(Some(ai));
+
+                let target = x.data.target.take();
+                for t in &target {
+                    if frame.is_some() { continue; }
+                    let point = Point(2 * t.0, t.1);
+                    let glyph = slice.get(point).with_fg(Color::black()).with_bg(0x400);
+                    slice.set(point, glyph);
+                }
+                x.data.target.set(target);
+
+                let extra = x.data.debug.take();
+                x.data.debug.set(extra.clone());
+                (debug, extra)
+            } else {
+                ("<none>".into(), "".into())
             };
             for eid in &self.board.entity_order {
                 let other = &self.board.entities[*eid];
@@ -2536,7 +2547,7 @@ mod tests {
 
     #[bench]
     fn bench_state_update(b: &mut test::Bencher) {
-        let mut state = State::new();
+        let mut state = State::new(Some(17));
         b.iter(|| {
             state.inputs.push(Input::Char('.'));
             state.update();

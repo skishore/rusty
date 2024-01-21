@@ -176,7 +176,7 @@ fn input(key: Key) -> Option<Input> {
 }
 
 fn main() {
-    let game = State::new();
+    let game = State::new(None);
     let mut output = Matrix::default();
     game.render(&mut output);
 

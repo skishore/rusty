@@ -1,6 +1,6 @@
 use std::cmp::max;
 
-use rand::random;
+use rand::Rng;
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -22,18 +22,19 @@ macro_rules! static_assert_size {
     };
 }
 
+pub type RNG = rand::rngs::StdRng;
 pub type HashSet<K> = fxhash::FxHashSet<K>;
 pub type HashMap<K, V> = fxhash::FxHashMap<K, V>;
 
-pub fn sample<T>(xs: &[T]) -> &T {
+pub fn sample<'a, T>(xs: &'a [T], rng: &mut RNG) -> &'a T {
     assert!(!xs.is_empty());
-    &xs[random::<usize>() % xs.len()]
+    &xs[rng.gen::<usize>() % xs.len()]
 }
 
-pub fn weighted<T>(xs: &[(i32, T)]) -> &T {
+pub fn weighted<'a, T>(xs: &'a [(i32, T)], rng: &mut RNG) -> &'a T {
     let total = xs.iter().fold(0, |acc, x| acc + x.0);
     assert!(total > 0);
-    let mut value = (random::<usize>() % total as usize) as i32;
+    let mut value = (rng.gen::<usize>() % total as usize) as i32;
     for (weight, choice) in xs {
         value -= weight;
         if value <= 0 { return choice; }
