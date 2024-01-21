@@ -22,6 +22,20 @@ const VISION_RADIUS: i32 = 3;
 
 //////////////////////////////////////////////////////////////////////////////
 
+// Timestamp
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Timestamp(u32);
+
+impl std::ops::Sub for Timestamp {
+    type Output = i32;
+    fn sub(self, other: Timestamp) -> Self::Output {
+        (self.0 - other.0) as Self::Output
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 // Vision
 
 pub struct VisionArgs {
@@ -176,8 +190,8 @@ type EntityHandle = Handle<EntityKnowledge>;
 pub struct CellKnowledge {
     handle: Option<EntityHandle>,
     pub point: Point,
-    pub since: u32,
     pub tile: &'static Tile,
+    pub time: Timestamp,
     pub visibility: i32,
 }
 static_assert_size!(CellKnowledge, 32);
@@ -202,7 +216,7 @@ pub struct Knowledge {
     pub cells: List<CellKnowledge>,
     pub entities: List<EntityKnowledge>,
     pub focus: Option<EID>,
-    pub since: u32,
+    pub time: Timestamp,
 }
 
 pub struct CellResult<'a> {
@@ -214,7 +228,7 @@ impl<'a> CellResult<'a> {
     // Field lookups
 
     pub fn age(&self) -> i32 {
-        self.cell.map(|x| (self.root.since - x.since) as i32).unwrap_or(std::i32::MAX)
+        self.cell.map(|x| self.root.time - x.time).unwrap_or(std::i32::MAX)
     }
 
     pub fn tile(&self) -> Option<&'static Tile> {
@@ -249,7 +263,7 @@ impl<'a> CellResult<'a> {
     }
 
     pub fn visible(&self) -> bool {
-        self.cell.map(|x| self.root.since == x.since).unwrap_or(false)
+        self.cell.map(|x| self.root.time == x.time).unwrap_or(false)
     }
 }
 
@@ -273,7 +287,7 @@ impl Knowledge {
 
     pub fn update(&mut self, me: &Entity, view: &BoardView, vision: &Vision) {
         self.age_out(me.player);
-        let since = self.since;
+        let time = self.time;
 
         // Entities have approximate knowledge about friends, even if unseen.
         for eid in me.friends() {
@@ -297,10 +311,10 @@ impl Knowledge {
             let tile = view.get_tile_at(point);
             self.cell_by_point.entry(point).and_modify(|x| {
                 self.cells.move_to_front(*x);
-                let cell = CellKnowledge { handle, point, since, tile, visibility };
+                let cell = CellKnowledge { handle, point, tile, time, visibility };
                 prev_handle = std::mem::replace(&mut self.cells[*x], cell).handle;
             }).or_insert_with(|| {
-                let cell = CellKnowledge { handle, point, since, tile, visibility };
+                let cell = CellKnowledge { handle, point, tile, time, visibility };
                 self.cells.push_front(cell)
             });
 
@@ -359,7 +373,7 @@ impl Knowledge {
 
     fn age_out(&mut self, _player: bool) {
         for x in &mut self.entities { x.age += 1; }
-        self.since += 1;
+        self.time.0 += 1;
     }
 
     fn forget(&mut self, player: bool) {
