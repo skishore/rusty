@@ -725,6 +725,7 @@ type Hint = (Goal, &'static Tile);
 pub struct FightState {
     age: i32,
     target: Point,
+    searching: bool,
 }
 
 #[derive(Debug, Default)]
@@ -796,7 +797,7 @@ fn explore_near(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> {
         entity.known.get(p).status().unwrap_or(Status::Free)
     };
     let done1 = |p: Point| {
-        if known.get(p).age() <= age { return false };
+        if known.get(p).age() < age { return false };
         dirs::ALL.iter().any(|x| known.get(p + *x).unblocked())
     };
     let done0 = |p: Point| {
@@ -892,6 +893,7 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
     ai.till_thirst = max(0, ai.till_thirst - 1);
 
     let (known, pos) = (&*entity.known, entity.pos);
+    let last_turn_age = known.time - ai.time;
     let mut seen = HashSet::default();
     for cell in &known.cells {
         if (ai.time - cell.time) >= 0 { break; }
@@ -924,15 +926,18 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
 
     // We're a predator, and we should chase and attack rivals.
     if !prey {
-        ai.fight = None;
+        let fight = std::mem::take(&mut ai.fight);
         let limit = ai.age_at_turn(MAX_FOLLOW_TURNS);
         let mut targets = known.entities.iter().filter(
             |x| x.rival).collect::<Vec<_>>();
         if !targets.is_empty() {
             targets.sort_unstable_by_key(|x| x.age);
             let EntityKnowledge { age, pos: target, .. } = *targets[0];
-            if age < limit { ai.fight = Some(FightState { age, target }); }
-            if age == 0 { ai.plan.clear(); }
+            let restart = age < last_turn_age;
+            let searching = !restart && fight.map(
+                |x| x.searching && x.target == target).unwrap_or(false);
+            if age < limit { ai.fight = Some(FightState { age, searching, target }); }
+            if restart { ai.plan.clear(); }
         }
         return;
     }
@@ -1053,13 +1058,14 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         if let Some(x) = flee_from_threats(pokemon, ai) {
             (dirs, targets) = (x.dirs, x.targets);
             ai.goal = Goal::Flee;
-        } else if let Some(x) = &ai.fight {
+        } else if let Some(x) = &mut ai.fight {
+            let search = if x.searching { pokemon.pos } else { x.target };
             if x.age == 0 {
-                ai.goal = Goal::Chase;
+                (ai.goal, x.searching) = (Goal::Chase, false);
                 return attack_target(pokemon, x.target, rng);
-            } else if let Some(x) = explore_near(pokemon, x.target, x.age) {
-                (dirs, targets) = (x.dirs, x.targets);
-                ai.goal = Goal::Chase;
+            } else if let Some(y) = explore_near(pokemon, search, x.age) {
+                (ai.goal, x.searching) = (Goal::Chase, true);
+                (dirs, targets) = (y.dirs, y.targets);
             }
         }
 
@@ -1082,12 +1088,12 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         if ai.till_thirst == 0 { add_candidates(ai, Goal::Drink); }
         if ai.till_hunger == 0 { add_candidates(ai, Goal::Eat); }
 
-        if dirs.is_empty() {
-            if let Some(x) = explore_near(pokemon, pokemon.pos, 9999) {
-                (dirs, targets) = (x.dirs, x.targets);
-            }
+        let age = std::i32::MAX;
+        if dirs.is_empty() && let Some(x) = explore_near(pokemon, pokemon.pos, age) {
+            (dirs, targets) = (x.dirs, x.targets);
+        } else if dirs.is_empty() {
+            return wander(*sample(&dirs::ALL, rng));
         }
-        if dirs.is_empty() { return wander(*sample(&dirs::ALL, rng)); }
         wander(*sample(&dirs, rng))
     };
 

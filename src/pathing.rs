@@ -343,7 +343,7 @@ pub fn AStar<F: Fn(Point) -> Status>(
 
 //////////////////////////////////////////////////////////////////////////////
 
-// Dijkstra map
+// DijkstraMap
 
 #[allow(non_snake_case)]
 pub fn DijkstraMap<F: Fn(Point) -> Status>(
@@ -375,13 +375,14 @@ pub fn DijkstraMap<F: Fn(Point) -> Status>(
                       if occipied { ASTAR_OCCUPIED_PENALTY } else { 0 };
 
             map.entry(next).and_modify(|x| {
+                // See AStar for comments about index != NOT_IN_HEAP.
                 let existing = heap.mut_node(*x);
                 if existing.index != NOT_IN_HEAP && existing.score > val {
-                    existing.score = val;
+                    (existing.score, existing.parent) = (val, prev);
                     heap.heapify(*x);
                 }
             }).or_insert_with(|| {
-                heap.push(AStarNode::new(next, SOURCE_NODE, 0, val))
+                heap.push(AStarNode::new(next, prev, 0, val))
             });
         }
     }
