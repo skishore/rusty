@@ -14,7 +14,7 @@ use crate::entity::{EID, PID, TID, EntityMap, EntityMapKey};
 use crate::entity::{Entity, Pokemon, Trainer};
 use crate::entity::{PokemonArgs, SummonArgs, TrainerArgs};
 use crate::entity::{PokemonEdge, PokemonIndividualData, PokemonSpeciesData};
-use crate::knowledge::{Knowledge, Vision, VisionArgs, get_pp, get_hp};
+use crate::knowledge::{Knowledge, Timestamp, Vision, VisionArgs, get_pp, get_hp};
 use crate::knowledge::{EntityKnowledge, EntityView, PokemonView};
 use crate::pathing::{AStar, DijkstraMap};
 use crate::pathing::{BFS, BFSResult, Status};
@@ -736,7 +736,7 @@ pub struct FlightState {
 pub struct AIState {
     goal: Goal,
     plan: Vec<Step>,
-    since: u32,
+    time: Timestamp,
     hints: HashMap<Goal, Point>,
     fight: Option<FightState>,
     flight: FlightState,
@@ -752,7 +752,7 @@ impl AIState {
         Self {
             goal: Goal::Explore,
             plan: vec![],
-            since: 0,
+            time: Timestamp::default(),
             hints: HashMap::default(),
             fight: None,
             flight: FlightState::default(),
@@ -879,14 +879,14 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
     let (known, pos) = (&*entity.known, entity.pos);
     let mut seen = HashSet::default();
     for cell in &known.cells {
-        if (ai.since - cell.since) as i32 >= 0 { break; }
+        if (ai.time - cell.time) >= 0 { break; }
         for (goal, tile) in hints {
             if cell.tile == tile && seen.insert(goal) {
                 ai.hints.insert(*goal, cell.point);
             }
         }
     }
-    ai.since = known.since;
+    ai.time = known.time;
 
     // TODO(shaunak): For now, only wild Pokemon have predator/prey relations
     // so we can skip this whole threat() branch based on this check. However,
