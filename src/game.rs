@@ -1,4 +1,5 @@
 use std::cmp::{max, min};
+use std::collections::VecDeque;
 use std::f64::consts::TAU;
 use std::ops::{Deref, DerefMut};
 
@@ -32,9 +33,10 @@ const ATTACK_RANGE: i32 = 8;
 const ASSESS_TIME: i32 = 17;
 const ASSESS_ANGLE: f64 = TAU / 3.;
 
-const MIN_FLIGHT_TIME: i32 = 8;
-const MAX_FLIGHT_TIME: i32 = 64;
-const MAX_FOLLOW_TIME: i32 = 64;
+const MIN_FLIGHT_TURNS: i32 = 8;
+const MAX_FLIGHT_TURNS: i32 = 64;
+const MAX_FOLLOW_TURNS: i32 = 64;
+const TURN_TIMES_LIMIT: usize = 64;
 
 const FOV_RADIUS_NPC: i32 = 12;
 const FOV_RADIUS_PC_: i32 = 21;
@@ -742,6 +744,7 @@ pub struct AIState {
     flight: FlightState,
     till_hunger: i32,
     till_thirst: i32,
+    turn_times: VecDeque<Timestamp>,
 }
 
 const MAX_HUNGER: i32 = 256;
@@ -758,7 +761,19 @@ impl AIState {
             flight: FlightState::default(),
             till_hunger: rng.gen::<i32>().rem_euclid(MAX_HUNGER),
             till_thirst: rng.gen::<i32>().rem_euclid(MAX_THIRST),
+            turn_times: VecDeque::with_capacity(TURN_TIMES_LIMIT),
         }
+    }
+
+    fn age_at_turn(&self, turn: i32) -> i32 {
+        if self.turn_times.is_empty() { return 0; }
+        self.time - self.turn_times[min(self.turn_times.len() - 1, turn as usize)]
+    }
+
+    fn record_turn(&mut self, time: Timestamp) {
+        if self.turn_times.len() == TURN_TIMES_LIMIT { self.turn_times.pop_back(); }
+        self.turn_times.push_front(self.time);
+        self.time = time;
     }
 }
 
@@ -886,7 +901,7 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
             }
         }
     }
-    ai.time = known.time;
+    ai.record_turn(known.time);
 
     // TODO(shaunak): For now, only wild Pokemon have predator/prey relations
     // so we can skip this whole threat() branch based on this check. However,
@@ -907,34 +922,25 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
         Entity::Trainer(_) => true,
     };
 
-    // Set up predator state in a trivial way. See caveats below about using
-    // age() here; we should switch it to "turn count" if possible.
+    // We're a predator, and we should chase and attack rivals.
     if !prey {
         ai.fight = None;
+        let limit = ai.age_at_turn(MAX_FOLLOW_TURNS);
         let mut targets = known.entities.iter().filter(
             |x| x.rival).collect::<Vec<_>>();
         if !targets.is_empty() {
             targets.sort_unstable_by_key(|x| x.age);
             let EntityKnowledge { age, pos: target, .. } = *targets[0];
-            if age < MAX_FOLLOW_TIME { ai.fight = Some(FightState { age, target }); }
+            if age < limit { ai.fight = Some(FightState { age, target }); }
             if age == 0 { ai.plan.clear(); }
         }
         return;
     }
 
-    // TODO(shaunak): We shouldn't use age() here because it means that this
-    // logic is affected by Knowledge updates in between turns.
-    //
-    // Note that our usage of age() in explore_near is similarly a problem;
-    // it's slightly better because it's either compared to entity ages (which
-    // is safe) or compared to 9999 (which is probably fine....)
-    //
-    // Ignore it for now; we don't have intermediate Knowledge updates yet.
-    //
-    // We can fix the issue by using a different age-out increment for
-    // intermediate and full updates.
+    // We're prey, and we should treat rivals as threats.
+    let limit = ai.age_at_turn(MAX_FLIGHT_TURNS);
     let mut threats: Vec<_> = known.entities.iter().filter_map(
-        |x| if x.age < MAX_FLIGHT_TIME && x.rival { Some(x.pos) } else { None }).collect();
+        |x| if x.age < limit && x.rival { Some(x.pos) } else { None }).collect();
     threats.sort_unstable_by_key(|x| (x.0, x.1));
     if threats == ai.flight.threats { return; }
 
@@ -2405,9 +2411,11 @@ impl State {
                                     let Some(mut ai) = x.data.ai.take() {
                 let debug = {
                     let a = std::mem::take(&mut ai.plan);
-                    let b = std::mem::take(&mut ai.flight.distances);
+                    let b = std::mem::take(&mut ai.turn_times);
+                    let c = std::mem::take(&mut ai.flight.distances);
                     let debug = format!("{:?}", ai);
-                    ai.flight.distances = b;
+                    ai.flight.distances = c;
+                    ai.turn_times = b;
                     ai.plan = a;
                     debug
                 };
