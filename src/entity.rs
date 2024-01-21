@@ -339,17 +339,17 @@ impl Eq for &'static PokemonSpeciesData {}
 
 // Slotmap support
 
-#[derive(Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[repr(transparent)]
 pub struct EID(NonZeroU64);
 static_assert_size!(Option<EID>, 8);
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct PID(EID);
 static_assert_size!(Option<PID>, 8);
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(transparent)]
 pub struct TID(EID);
 static_assert_size!(Option<TID>, 8);
