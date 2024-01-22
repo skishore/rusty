@@ -17,8 +17,7 @@ use crate::entity::{PokemonArgs, SummonArgs, TrainerArgs};
 use crate::entity::{PokemonEdge, PokemonIndividualData, PokemonSpeciesData};
 use crate::knowledge::{Knowledge, Timestamp, Vision, VisionArgs, get_pp, get_hp};
 use crate::knowledge::{EntityKnowledge, EntityView, PokemonView};
-use crate::pathing::{AStar, DijkstraMap};
-use crate::pathing::{BFS, BFSResult, Status};
+use crate::pathing::{AStar, BFS, BFSResult, Dijkstra, DijkstraMap, Status};
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -790,7 +789,25 @@ fn wander(dir: Point) -> Action {
     step(dir, WANDER_TURNS)
 }
 
-fn explore_near(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> {
+fn explore(entity: &Entity) -> Option<BFSResult> {
+    let (known, pos) = (&*entity.known, entity.pos);
+    let check = |p: Point| {
+        if p == pos { return Status::Free; }
+        entity.known.get(p).status().unwrap_or(Status::Free)
+    };
+    let done1 = |p: Point| {
+        if known.get(p).tile().is_some() { return false };
+        dirs::ALL.iter().any(|x| known.get(p + *x).unblocked())
+    };
+    let done0 = |p: Point| {
+        done1(p) && dirs::ALL.iter().all(|x| !known.get(p + *x).blocked())
+    };
+
+    BFS(pos, done0, BFS_LIMIT_WANDER, check).or_else(||
+    BFS(pos, done1, BFS_LIMIT_WANDER, check))
+}
+
+fn search_around(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> {
     let (known, pos) = (&*entity.known, entity.pos);
     let check = |p: Point| {
         if p == pos { return Status::Free; }
@@ -804,8 +821,8 @@ fn explore_near(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> {
         done1(p) && dirs::ALL.iter().all(|x| !known.get(p + *x).blocked())
     };
 
-    BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
-    BFS(source, done1, BFS_LIMIT_WANDER, check))
+    Dijkstra(source, done0, ASTAR_LIMIT_WANDER, check).or_else(||
+    Dijkstra(source, done1, ASTAR_LIMIT_WANDER, check))
 }
 
 fn attack_target(entity: &Entity, target: Point, rng: &mut RNG) -> Action {
@@ -1058,11 +1075,11 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
             (dirs, targets) = (x.dirs, x.targets);
             ai.goal = Goal::Flee;
         } else if let Some(x) = &mut ai.fight {
-            let search = if x.searching { pokemon.pos } else { x.target };
+            let source = if x.searching { pokemon.pos } else { x.target };
             if x.age == 0 {
                 (ai.goal, x.searching) = (Goal::Chase, false);
                 return attack_target(pokemon, x.target, rng);
-            } else if let Some(y) = explore_near(pokemon, search, x.age) {
+            } else if let Some(y) = search_around(pokemon, source, x.age) {
                 (ai.goal, x.searching) = (Goal::Chase, true);
                 (dirs, targets) = (y.dirs, y.targets);
             }
@@ -1087,8 +1104,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         if ai.till_thirst == 0 { add_candidates(ai, Goal::Drink); }
         if ai.till_hunger == 0 { add_candidates(ai, Goal::Eat); }
 
-        let age = std::i32::MAX;
-        if dirs.is_empty() && let Some(x) = explore_near(pokemon, pokemon.pos, age) {
+        if dirs.is_empty() && let Some(x) = explore(pokemon) {
             (dirs, targets) = (x.dirs, x.targets);
         } else if dirs.is_empty() {
             return wander(*sample(&dirs::ALL, rng));
