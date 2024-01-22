@@ -821,8 +821,8 @@ fn search_around(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> 
         done1(p) && dirs::ALL.iter().all(|x| !known.get(p + *x).blocked())
     };
 
-    Dijkstra(source, done0, ASTAR_LIMIT_WANDER, check).or_else(||
-    Dijkstra(source, done1, ASTAR_LIMIT_WANDER, check))
+    BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
+    BFS(source, done1, BFS_LIMIT_WANDER, check))
 }
 
 fn attack_target(entity: &Entity, target: Point, rng: &mut RNG) -> Action {
