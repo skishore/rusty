@@ -343,6 +343,67 @@ pub fn AStar<F: Fn(Point) -> Status>(
 
 //////////////////////////////////////////////////////////////////////////////
 
+// Dijkstra
+
+// TODO(shaunak): This search algorithm is non-isotropic. It prefers to move
+// northwest. Fix it by sampling all nodes at `score` matching `target`.
+//
+// TODO(shaunak): Pass in an additional heuristic to bias this search.
+//
+// TODO(shaunak): Unify this code with AStar and DijkstraMap, if possible.
+#[allow(non_snake_case)]
+pub fn Dijkstra<F: Fn(Point) -> bool, G: Fn(Point) -> Status>(
+        source: Point, target: F, limit: i32, check: G) -> Option<BFSResult> {
+    let mut map = HashMap::default();
+    let mut heap = AStarHeap::default();
+
+    let node = AStarNode::new(source, SOURCE_NODE, 0, 0);
+    map.insert(source, heap.push(node));
+
+    for i in 0..limit {
+        if heap.is_empty() { break; }
+        let prev = heap.extract_min();
+        let prev_pos = heap.get_node(prev).pos;
+        let prev_val = heap.get_node(prev).score;
+        if i > 0 && target(prev_pos) {
+            let mut dir = Point::default();
+            let mut current = heap.get_node(prev);
+            while current.pos != source {
+                dir = current.pos - source;
+                current = heap.get_node(current.parent);
+            }
+            return Some(BFSResult { dirs: vec![dir], targets: vec![prev_pos] });
+        }
+
+        for dir in &dirs::ALL {
+            let next = prev_pos + *dir;
+            let test = check(next);
+            if test == Status::Blocked { continue; }
+
+            let diagonal = dir.0 != 0 && dir.1 != 0;
+            let occipied = test == Status::Occupied;
+            let val = prev_val + ASTAR_UNIT_COST +
+                      if diagonal { ASTAR_DIAGONAL_PENALTY } else { 0 } +
+                      if occipied { ASTAR_OCCUPIED_PENALTY } else { 0 };
+
+            map.entry(next).and_modify(|x| {
+                // See AStar for comments about index != NOT_IN_HEAP.
+                let existing = heap.mut_node(*x);
+                if existing.index != NOT_IN_HEAP && existing.score > val {
+                    (existing.score, existing.parent) = (val, prev);
+                    heap.heapify(*x);
+                }
+            }).or_insert_with(|| {
+                heap.push(AStarNode::new(next, prev, 0, val))
+            });
+        }
+    }
+
+    None
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 // DijkstraMap
 
 #[allow(non_snake_case)]
