@@ -723,6 +723,7 @@ type Hint = (Goal, &'static Tile);
 #[derive(Debug)]
 pub struct FightState {
     age: i32,
+    bias: Point,
     target: Point,
     searching: bool,
 }
@@ -807,7 +808,7 @@ fn explore(entity: &Entity) -> Option<BFSResult> {
     BFS(pos, done1, BFS_LIMIT_WANDER, check))
 }
 
-fn search_around(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> {
+fn search_around(entity: &Entity, source: Point, age: i32, bias: Point) -> Option<BFSResult> {
     let (known, pos) = (&*entity.known, entity.pos);
     let check = |p: Point| {
         if p == pos { return Status::Free; }
@@ -820,9 +821,15 @@ fn search_around(entity: &Entity, source: Point, age: i32) -> Option<BFSResult> 
     let done0 = |p: Point| {
         done1(p) && dirs::ALL.iter().all(|x| !known.get(p + *x).blocked())
     };
+    let heuristic = |p: Point| { 8 * (pos + bias - p).len_nethack() };
 
-    BFS(source, done0, BFS_LIMIT_WANDER, check).or_else(||
-    BFS(source, done1, BFS_LIMIT_WANDER, check))
+    let path = Dijkstra(source, done0, ASTAR_LIMIT_WANDER, check, heuristic).or_else(||
+               Dijkstra(source, done1, ASTAR_LIMIT_WANDER, check, heuristic))?;
+    if path.is_empty() {
+        Some(BFSResult { dirs: vec![Point::default()], targets: vec![source] })
+    } else {
+        Some(BFSResult { dirs: vec![path[0] - source], targets: vec![path[path.len() - 1]] })
+    }
 }
 
 fn attack_target(entity: &Entity, target: Point, rng: &mut RNG) -> Action {
@@ -950,9 +957,9 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
             targets.sort_unstable_by_key(|x| x.age);
             let EntityKnowledge { age, pos: target, .. } = *targets[0];
             let restart = age < last_turn_age;
-            let searching = !restart && fight.map(
-                |x| x.searching && x.target == target).unwrap_or(false);
-            if age < limit { ai.fight = Some(FightState { age, searching, target }); }
+            let (mut bias, mut searching) = (target - pos, false);
+            if !restart && let Some(x) = fight { (bias, searching) = (x.bias, x.searching) };
+            if age < limit { ai.fight = Some(FightState { age, bias, searching, target }); }
             if restart { ai.plan.clear(); }
         }
         return;
@@ -1079,7 +1086,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
             if x.age == 0 {
                 (ai.goal, x.searching) = (Goal::Chase, false);
                 return attack_target(pokemon, x.target, rng);
-            } else if let Some(y) = search_around(pokemon, source, x.age) {
+            } else if let Some(y) = search_around(pokemon, source, x.age, x.bias) {
                 (ai.goal, x.searching) = (Goal::Chase, true);
                 (dirs, targets) = (y.dirs, y.targets);
             }

@@ -295,7 +295,8 @@ pub fn AStar<F: Fn(Point) -> Status>(
 //
 // TODO(shaunak): Pass in an additional heuristic to bias this search.
 //
-// TODO(shaunak): Unify this code with AStar and DijkstraMap, if possible.
+// TODO(shaunak): If it's AStar, and we haven't found a target, return a path
+// that gets us as close as possible to the target.
 #[allow(non_snake_case)]
 pub fn Dijkstra<F: Fn(Point) -> bool, G: Fn(Point) -> Status, H: Fn(Point) -> i32>(
         source: Point, target: F, limit: i32, check: G, heuristic: H) -> Option<Vec<Point>> {
