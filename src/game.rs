@@ -819,7 +819,6 @@ fn attack_target(entity: &Entity, target: Point, rng: &mut RNG) -> Action {
     } else if !move_ready(entity) {
         return Action::Look(target - source);
     }
-    if 1 == 1 { return Action::Look(target - source); }
     Action::Attack(target)
 }
 
@@ -1463,7 +1462,7 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 other.dir = source - target;
                 let removed = match other {
                     Entity::Pokemon(x) => {
-                        let damage = rng.gen::<i32>().rem_euclid(ATTACK_DAMAGE);
+                        let damage = 0 * rng.gen::<i32>().rem_euclid(ATTACK_DAMAGE);
                         x.data.me.cur_hp = max(0, x.data.me.cur_hp - damage);
                         x.data.me.cur_hp == 0
                     }
