@@ -47,7 +47,7 @@ lazy_static! {
             ("Squirtle",   70, 0.25, Glyph::wdfg('S', 0x234), vec!["Ice Beam"]),
             ("Eevee",      80, 0.20, Glyph::wdfg('E', 0x420), vec!["Headbutt"]),
             ("Pikachu",    60, 0.25, Glyph::wdfg('P', 0x440), vec![]),
-            ("Pidgey",     80, 0.50, Glyph::wide('P'), vec![]),
+            ("Pidgey",     80, 0.33, Glyph::wide('P'), vec![]),
             ("Ratatta",    60, 0.25, Glyph::wide('R'), vec!["Headbutt"]),
         ];
         let mut result = HashMap::default();

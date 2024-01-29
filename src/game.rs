@@ -843,6 +843,7 @@ fn attack_target(entity: &Entity, target: Point, rng: &mut RNG) -> Action {
     } else if !move_ready(entity) {
         return Action::Look(target - source);
     }
+    //if 1 == 1 { return Action::Look(target - source); }
     Action::Attack(target)
 }
 
@@ -877,38 +878,54 @@ fn assess_threats(source: Point, ai: &mut AIState) {
 
 fn flee_from_threats(entity: &Entity, ai: &mut AIState) -> Option<BFSResult> {
     if !ai.flight.fleeing { return None; }
+    if ai.flight.threats.is_empty() { return None; }
 
-    let score_if_escaped = std::i32::MAX;
     let (known, pos) = (&*entity.known, entity.pos);
-    let lookup = |x| ai.flight.distances.get(&x).copied().unwrap_or(score_if_escaped);
+    let check = |p: Point| {
+        if p == pos { return Status::Free; }
+        if known.get(p).unblocked() { Status::Free } else { Status::Blocked }
+    };
 
-    let mut best_score = lookup(pos);
-    let mut dirs = vec![Point::default()];
-    for dir in &dirs::ALL {
-        let point = pos + *dir;
-        if known.get(point).status() != Some(Status::Free) { continue; }
-        let score = lookup(point);
-        if score < best_score { continue; }
-        if score > best_score { dirs.clear(); }
-        best_score = score;
-        dirs.push(*dir);
+    let mut map = HashMap::default();
+    map.insert(pos, 0);
+    DijkstraMap(check, FLIGHT_MAP_LIMIT, &mut map);
+
+    let score = |p: Point, v: i32| {
+        let mut threat = Point::default();
+        let mut threat_distance = std::i32::MAX;
+        for x in &ai.flight.threats {
+            let y = (*x - p).len_nethack();
+            if y < threat_distance { (threat, threat_distance) = (*x, y); }
+        }
+        let blocked = {
+            let los = LOS(p, threat);
+            let len = max(los.len(), 2) - 2;
+            los.iter().skip(1).take(len).any(|x| known.get(*x).blocked())
+        };
+        let frontier = dirs::ALL.iter().any(|x| !known.get(*x).tile().is_some());
+
+        let source_distance = 0.0625 * v as f64;
+        let threat_distance = threat_distance as f64;
+        1.2 * threat_distance +
+        -1.0 * source_distance +
+        if blocked { 16.0 } else { 0.0 } +
+        if frontier { 64.0 } else { 0.0 }
+    };
+
+    let mut best_point = pos;
+    let mut best_score = std::f64::MIN;
+    let mut best_nearby_point = pos;
+    let mut best_nearby_score = std::f64::MIN;
+    for (k, v) in &map {
+        let s = score(*k, *v);
+        if s > best_score {
+            (best_point, best_score) = (*k, s);
+        }
+        if s > best_nearby_score && (*k - pos).len_l1() == 1 {
+            (best_nearby_point, best_nearby_score) = (*k, s);
+        }
     }
-
-    if best_score == score_if_escaped {
-        let targets = dirs.iter().map(|x| pos + *x).collect();
-        return Some(BFSResult { dirs, targets });
-    }
-
-    let mut best_score = -1;
-    let mut targets = vec![];
-    for (point, score) in &ai.flight.distances {
-        if *score < best_score { continue; }
-        if *score > best_score { targets.clear(); }
-        targets.push(*point);
-        best_score = *score;
-    }
-
-    Some(BFSResult { dirs, targets })
+    Some(BFSResult { dirs: vec![best_nearby_point - pos], targets: vec![best_point] })
 }
 
 fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
@@ -1485,7 +1502,7 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 other.dir = source - target;
                 let removed = match other {
                     Entity::Pokemon(x) => {
-                        let damage = 0 * rng.gen::<i32>().rem_euclid(ATTACK_DAMAGE);
+                        let damage = rng.gen::<i32>().rem_euclid(ATTACK_DAMAGE);
                         x.data.me.cur_hp = max(0, x.data.me.cur_hp - damage);
                         x.data.me.cur_hp == 0
                     }
@@ -2375,7 +2392,7 @@ impl State {
         let options = ["Pidgey", "Ratatta"];
         for i in 0..20 {
             if let Some(pos) = pos(&board, &mut rng) {
-                let index = if i % 20 == 0 { 1 } else { 0 };
+                let index = if i % 10 == 0 { 1 } else { 0 };
                 let (dir, species) = (*sample(&dirs::ALL, &mut rng), options[index]);
                 board.add_pokemon(&PokemonArgs { pos, dir, species });
             }
@@ -2448,7 +2465,7 @@ impl State {
                     debug
                 };
 
-                if 1 == 1 {
+                if 0 == 1 {
                     for (point, value) in &ai.flight.distances {
                         let point = Point(2 * point.0, point.1);
                         let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
