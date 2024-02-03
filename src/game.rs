@@ -5,6 +5,7 @@ use std::ops::{Deref, DerefMut};
 
 use lazy_static::lazy_static;
 use rand::{Rng, SeedableRng};
+use rand_distr::{Distribution, Normal};
 
 use crate::{cast, static_assert_size};
 use crate::base::{Buffer, Color, Glyph, Slice};
@@ -31,6 +32,14 @@ const ATTACK_RANGE: i32 = 8;
 
 const ASSESS_TIME: i32 = 17;
 const ASSESS_ANGLE: f64 = TAU / 3.;
+
+const MAX_ASSESS: i32 = 32;
+const MAX_HUNGER: i32 = 1024;
+const MAX_THIRST: i32 = 256;
+
+const ASSESS_STDEV: f64 = TAU / 18.;
+const ASSESS_STEPS: i32 = 4;
+const ASSESS_TURNS: i32 = 32;
 
 const MIN_FLIGHT_TURNS: i32 = 8;
 const MAX_FLIGHT_TURNS: i32 = 64;
@@ -710,7 +719,7 @@ fn rivals<'a>(trainer: &'a Trainer) -> Vec<(&'a EntityKnowledge, &'a PokemonView
 //}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum Goal { Chase, Drink, Eat, Explore, Flee }
+enum Goal { Assess, Chase, Drink, Eat, Explore, Flee }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StepKind { Calm, Drink, Eat, Look, Move }
@@ -743,13 +752,11 @@ pub struct AIState {
     hints: HashMap<Goal, Point>,
     fight: Option<FightState>,
     flight: FlightState,
+    till_assess: i32,
     till_hunger: i32,
     till_thirst: i32,
     turn_times: VecDeque<Timestamp>,
 }
-
-const MAX_HUNGER: i32 = 256;
-const MAX_THIRST: i32 = 64;
 
 impl AIState {
     fn new(rng: &mut RNG) -> Self {
@@ -760,6 +767,7 @@ impl AIState {
             hints: HashMap::default(),
             fight: None,
             flight: FlightState::default(),
+            till_assess: rng.gen::<i32>().rem_euclid(MAX_ASSESS),
             till_hunger: rng.gen::<i32>().rem_euclid(MAX_HUNGER),
             till_thirst: rng.gen::<i32>().rem_euclid(MAX_THIRST),
             turn_times: VecDeque::with_capacity(TURN_TIMES_LIMIT),
@@ -847,8 +855,26 @@ fn attack_target(entity: &Entity, target: Point, rng: &mut RNG) -> Action {
     Action::Attack(target)
 }
 
+fn assess_direction(dir: Point, ai: &mut AIState, rng: &mut RNG) {
+    let Point(dx, dy) = dir;
+
+    for _ in 0..ASSESS_STEPS {
+        let scale = 1000;
+        let steps = rng.gen::<i32>().rem_euclid(ASSESS_TURNS);
+        let angle = Normal::new(0., ASSESS_STDEV).unwrap().sample(rng);
+        let (sin, cos) = (angle.sin(), angle.cos());
+        let rx = (cos * (scale * dx) as f64) + (sin * (scale * dy) as f64);
+        let ry = (cos * (scale * dy) as f64) - (sin * (scale * dx) as f64);
+        let target = Point(rx as i32, ry as i32);
+        for _ in 0..steps {
+            ai.plan.push(Step { kind: StepKind::Look, target })
+        }
+    }
+}
+
 fn assess_threats(source: Point, ai: &mut AIState) {
     if !ai.flight.fleeing { return; }
+    if ai.flight.threats.is_empty() { return; }
 
     let target = ai.flight.threats[0];
     let Point(dx, dy) = target - source;
@@ -872,7 +898,6 @@ fn assess_threats(source: Point, ai: &mut AIState) {
         let target = Point(rx as i32, ry as i32);
         ai.plan.push(Step { kind: StepKind::Look, target });
     }
-
     ai.plan.push(Step { kind: StepKind::Calm, target: source });
 }
 
@@ -929,6 +954,7 @@ fn flee_from_threats(entity: &Entity, ai: &mut AIState) -> Option<BFSResult> {
 }
 
 fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
+    ai.till_assess = max(0, ai.till_assess - 1);
     ai.till_hunger = max(0, ai.till_hunger - 1);
     ai.till_thirst = max(0, ai.till_thirst - 1);
 
@@ -1002,7 +1028,8 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
     DijkstraMap(check, FLIGHT_MAP_LIMIT, &mut ai.flight.distances);
 }
 
-fn plan_from_cached(entity: &Entity, hints: &[Hint], ai: &mut AIState) -> Option<Action> {
+fn plan_from_cached(entity: &Entity, hints: &[Hint],
+                    ai: &mut AIState, rng: &mut RNG) -> Option<Action> {
     if ai.plan.is_empty() { return None; }
 
     // Check whether we can execute the immediate next step in the plan.
@@ -1017,6 +1044,8 @@ fn plan_from_cached(entity: &Entity, hints: &[Hint], ai: &mut AIState) -> Option
         goals.push(Goal::Flee);
     } else if ai.fight.is_some() {
         goals.push(Goal::Chase);
+    } else if ai.goal == Goal::Assess {
+        goals.push(Goal::Assess);
     } else {
         if ai.till_hunger == 0 && ai.hints.contains_key(&Goal::Eat) {
             goals.push(Goal::Eat);
@@ -1055,10 +1084,15 @@ fn plan_from_cached(entity: &Entity, hints: &[Hint], ai: &mut AIState) -> Option
         StepKind::Calm => { ai.flight.fleeing = false; None }
         StepKind::Drink => { ai.till_thirst = MAX_THIRST; wait }
         StepKind::Eat => { ai.till_hunger = MAX_HUNGER; wait }
-        StepKind::Look => Some(Action::Look(next.target)),
+        StepKind::Look => {
+            if ai.plan.is_empty() && ai.goal == Goal::Assess {
+                ai.till_assess = rng.gen::<i32>().rem_euclid(MAX_ASSESS);
+            }
+            Some(Action::Look(next.target))
+        }
         StepKind::Move => {
             let mut target = next.target;
-            for next in ai.plan.iter().rev().take(3) {
+            for next in ai.plan.iter().rev().take(8) {
                 if next.kind == StepKind::Look { break; }
                 for point in LOS(pos, next.target) {
                     if known.get(point).blocked() { break; }
@@ -1080,7 +1114,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         (Goal::Eat, Tile::get('%')),
     ];
     update_ai_state(pokemon, &hints, ai);
-    if let Some(x) = plan_from_cached(pokemon, &hints, ai) { return x; }
+    if let Some(x) = plan_from_cached(pokemon, &hints, ai, rng) { return x; }
 
     ai.plan.clear();
     ai.goal = Goal::Explore;
@@ -1128,7 +1162,10 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         if ai.till_thirst == 0 { add_candidates(ai, Goal::Drink); }
         if ai.till_hunger == 0 { add_candidates(ai, Goal::Eat); }
 
-        if dirs.is_empty() && let Some(x) = explore(pokemon) {
+        if dirs.is_empty() && ai.till_assess == 0 {
+            (dirs, targets) = (vec![Point::default()], vec![pos]);
+            ai.goal = Goal::Assess;
+        } else if dirs.is_empty() && let Some(x) = explore(pokemon) {
             (dirs, targets) = (x.dirs, x.targets);
         } else if dirs.is_empty() {
             return wander(*sample(&dirs::ALL, rng));
@@ -1156,6 +1193,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         let kind = StepKind::Move;
         ai.plan = path.iter().map(|x| Step { kind, target: *x }).collect();
         match ai.goal {
+            Goal::Assess => assess_direction(pokemon.dir, ai, rng),
             Goal::Chase => {}
             Goal::Drink => ai.plan.push(Step { kind: StepKind::Drink, target }),
             Goal::Eat => ai.plan.push(Step { kind: StepKind::Eat, target }),
@@ -1163,7 +1201,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
             Goal::Flee => assess_threats(target, ai),
         }
         ai.plan.reverse();
-        if let Some(x) = plan_from_cached(pokemon, &hints, ai) { return x; }
+        if let Some(x) = plan_from_cached(pokemon, &hints, ai, rng) { return x; }
         ai.plan.clear();
     }
     fallback
