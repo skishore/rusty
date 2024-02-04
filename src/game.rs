@@ -18,7 +18,8 @@ use crate::entity::{PokemonArgs, SummonArgs, TrainerArgs};
 use crate::entity::{PokemonEdge, PokemonIndividualData, PokemonSpeciesData};
 use crate::knowledge::{Knowledge, Timestamp, Vision, VisionArgs, get_pp, get_hp};
 use crate::knowledge::{EntityKnowledge, EntityView, PokemonView};
-use crate::pathing::{AStar, BFS, BFSResult, Dijkstra, DijkstraMap, Status};
+use crate::pathing::{AStar, AStarDistance, BFS, BFSResult, Status};
+use crate::pathing::{Dijkstra, DijkstraMap, DijkstraSearch};
 
 //////////////////////////////////////////////////////////////////////////////
 
@@ -55,7 +56,8 @@ const WANDER_TURNS: f64 = 2.;
 const WORLD_SIZE: i32 = 100;
 
 const ASTAR_LIMIT_ATTACK: i32 = 32;
-const ASTAR_LIMIT_WANDER: i32 = 256;
+const ASTAR_LIMIT_SEARCH: i32 = 256;
+const ASTAR_LIMIT_WANDER: i32 = 1024;
 const BFS_LIMIT_ATTACK: i32 = 8;
 const BFS_LIMIT_WANDER: i32 = 64;
 const FLIGHT_MAP_LIMIT: i32 = 1024;
@@ -798,11 +800,19 @@ fn wander(dir: Point) -> Action {
     step(dir, WANDER_TURNS)
 }
 
+fn coerce(source: Point, path: &[Point]) -> BFSResult {
+    if path.is_empty() {
+        BFSResult { dirs: vec![Point::default()], targets: vec![source] }
+    } else {
+        BFSResult { dirs: vec![path[0] - source], targets: vec![path[path.len() - 1]] }
+    }
+}
+
 fn explore(entity: &Entity) -> Option<BFSResult> {
     let (known, pos) = (&*entity.known, entity.pos);
     let check = |p: Point| {
         if p == pos { return Status::Free; }
-        entity.known.get(p).status().unwrap_or(Status::Free)
+        known.get(p).status().unwrap_or(Status::Free)
     };
     let done1 = |p: Point| {
         if known.get(p).tile().is_some() { return false };
@@ -820,7 +830,7 @@ fn search_around(entity: &Entity, source: Point, age: i32, bias: Point) -> Optio
     let (known, pos) = (&*entity.known, entity.pos);
     let check = |p: Point| {
         if p == pos { return Status::Free; }
-        entity.known.get(p).status().unwrap_or(Status::Free)
+        known.get(p).status().unwrap_or(Status::Free)
     };
     let done1 = |p: Point| {
         if known.get(p).age() < age { return false };
@@ -831,13 +841,9 @@ fn search_around(entity: &Entity, source: Point, age: i32, bias: Point) -> Optio
     };
     let heuristic = |p: Point| { 8 * (pos + bias - p).len_nethack() };
 
-    let path = Dijkstra(source, done0, ASTAR_LIMIT_WANDER, check, heuristic).or_else(||
-               Dijkstra(source, done1, ASTAR_LIMIT_WANDER, check, heuristic))?;
-    if path.is_empty() {
-        Some(BFSResult { dirs: vec![Point::default()], targets: vec![source] })
-    } else {
-        Some(BFSResult { dirs: vec![path[0] - source], targets: vec![path[path.len() - 1]] })
-    }
+    let path = Dijkstra(source, done0, ASTAR_LIMIT_SEARCH, check, heuristic).or_else(||
+               Dijkstra(source, done1, ASTAR_LIMIT_SEARCH, check, heuristic))?;
+    Some(coerce(source, &path))
 }
 
 fn attack_target(entity: &Entity, target: Point, rng: &mut RNG) -> Action {
@@ -1063,6 +1069,18 @@ fn plan_from_cached(entity: &Entity, hints: &[Hint],
     if goals.is_empty() { goals.push(Goal::Explore); }
     if !goals.contains(&ai.goal) { return None; }
 
+    // Check if we saw a shortcut that would also satisfy the goal.
+    if let Some(x) = ai.hints.get(&ai.goal) && known.get(*x).visible() {
+        let target = ai.plan.iter().find_map(
+            |x| if x.kind == StepKind::Move { Some(x.target) } else { None });
+        if let Some(y) = target && AStarDistance(pos, *x) < AStarDistance(pos, y) {
+            let los = LOS(pos, *x);
+            let check = |p: Point| { known.get(p).status().unwrap_or(Status::Free) };
+            let free = (1..los.len() - 1).all(|i| check(los[i]) == Status::Free);
+            if free { return None; }
+        }
+    }
+
     // Check if we got specific information that invalidates the plan.
     let point_matches_goal = |goal: Goal, point: Point| {
         let tile = hints.iter().find_map(
@@ -1127,8 +1145,8 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
     ai.goal = Goal::Explore;
     pokemon.data.target.take();
     pokemon.data.debug.set("Recomputing plan!".into());
-    let (mut dirs, mut targets) = (vec![], vec![]);
     let (known, pos) = (&pokemon.known, pokemon.pos);
+    let mut result = BFSResult { dirs: vec![], targets: vec![] };
 
     let fallback = {
         let check = |p: Point| {
@@ -1137,8 +1155,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         };
 
         if let Some(x) = flee_from_threats(pokemon, ai) {
-            (dirs, targets) = (x.dirs, x.targets);
-            ai.goal = Goal::Flee;
+            (ai.goal, result) = (Goal::Flee, x);
         } else if let Some(x) = &mut ai.fight {
             let search_nearby = x.search_turns > x.bias.len_l1();
             let source = if search_nearby { pokemon.pos } else { x.target };
@@ -1146,44 +1163,44 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
                 ai.goal = Goal::Chase;
                 return attack_target(pokemon, x.target, rng);
             } else if let Some(y) = search_around(pokemon, source, x.age, x.bias) {
-                ai.goal = Goal::Chase;
-                (dirs, targets) = (y.dirs, y.targets);
+                (ai.goal, result) = (Goal::Chase, y);
             }
         }
 
         let mut add_candidates = |ai: &mut AIState, goal: Goal| {
             if ai.goal != Goal::Explore { return; }
 
+            let option = ai.hints.get(&goal);
             let tile = hints.iter().find_map(
                 |x| if x.0 == goal { Some(x.1) } else { None });
-            if tile.is_none() { return; }
+            if option.is_none() || tile.is_none() { return; }
 
-            let target = |p: Point| known.get(p).tile() == tile;
+            let (option, tile) = (*option.unwrap(), tile.unwrap());
+            let target = |p: Point| known.get(p).tile() == Some(tile);
             if target(pos) {
-                (dirs, targets) = (vec![Point::default()], vec![pos]);
-                ai.goal = goal;
-            } else if let Some(x) = BFS(pos, target, BFS_LIMIT_WANDER, check) {
-                (dirs, targets) = (x.dirs, x.targets);
-                ai.goal = goal;
+                (ai.goal, result) = (goal, coerce(pos, &[]));
+            } else if let Some(x) = DijkstraSearch(pos, target, ASTAR_LIMIT_WANDER, check) {
+                (ai.goal, result) = (goal, coerce(pos, &x));
+            } else if let Some(x) = AStar(pos, option, ASTAR_LIMIT_WANDER, check) {
+                (ai.goal, result) = (goal, coerce(pos, &x));
             }
         };
         if ai.till_thirst == 0 { add_candidates(ai, Goal::Drink); }
         if ai.till_hunger == 0 { add_candidates(ai, Goal::Eat); }
 
-        if dirs.is_empty() && ai.till_assess == 0 {
-            (dirs, targets) = (vec![Point::default()], vec![pos]);
-            ai.goal = Goal::Assess;
-        } else if dirs.is_empty() && let Some(x) = explore(pokemon) {
-            (dirs, targets) = (x.dirs, x.targets);
-        } else if dirs.is_empty() {
+        if result.dirs.is_empty() && ai.till_assess == 0 {
+            (ai.goal, result) = (Goal::Assess, coerce(pos, &[]));
+        } else if result.dirs.is_empty() && let Some(x) = explore(pokemon) {
+            (ai.goal, result) = (Goal::Explore, x);
+        } else if result.dirs.is_empty() {
             return wander(*sample(&dirs::ALL, rng));
         }
-        wander(*sample(&dirs, rng))
+        wander(*sample(&result.dirs, rng))
     };
 
-    if targets.is_empty() { return fallback; }
+    if result.targets.is_empty() { return fallback; }
 
-    let mut target = *targets.select_nth_unstable_by_key(
+    let mut target = *result.targets.select_nth_unstable_by_key(
         0, |x| (*x - pos).len_l2_squared()).1;
     if ai.goal == Goal::Explore {
         for _ in 0..64 {
@@ -1191,7 +1208,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
             if known.get(candidate).tile().is_none() { target = candidate; }
         }
     }
-    pokemon.data.target.set(targets);
+    pokemon.data.target.set(result.targets);
 
     let check = |p: Point| {
         if p == pos { return Status::Free; }
@@ -1481,6 +1498,7 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             if look != Point::default() {
                 state.board.entities[eid].dir = look;
             }
+            let factor = dir.len_l2();
             let entity = &state.board.entities[eid];
             let (source, target) = (entity.pos, entity.pos + dir);
             match state.board.get_status(target) {
@@ -1498,14 +1516,14 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                                 "You swap places with {}.", name(&x.data.me)));
                         }
                         state.board.swap_entities(source, target);
-                        return ActionResult::success_turns(turns);
+                        return ActionResult::success_turns(factor * turns);
                     }
                     state.board.entities[eid].dir = dir;
                     ActionResult::failure()
                 }
                 Status::Free => {
                     state.board.move_entity(eid, target);
-                    ActionResult::success_turns(turns)
+                    ActionResult::success_turns(factor * turns)
                 }
             }
         }
