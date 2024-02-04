@@ -225,10 +225,9 @@ const ASTAR_OCCUPIED_PENALTY: i32 = 64;
 
 // Expose a distance function for use in other heuristics.
 #[allow(non_snake_case)]
-pub fn AStarDistance(a: Point, b: Point) -> i32 {
-    let ax = (a.0 - b.0).abs();
-    let ay = (a.1 - b.1).abs();
-    ASTAR_UNIT_COST * max(ax, ay) + ASTAR_DIAGONAL_PENALTY * min(ax, ay)
+pub fn AStarLength(p: Point) -> i32 {
+    let (x, y) = (p.0.abs(), p.1.abs());
+    ASTAR_UNIT_COST * max(x, y) + ASTAR_DIAGONAL_PENALTY * min(x, y)
 }
 
 // "diff" penalizes paths that travel far from the direct line-of-sight
@@ -270,7 +269,7 @@ fn AStarHeuristic(p: Point, los: &Vec<Point>) -> i32 {
         }
     })();
 
-   ASTAR_LOS_DIFF_PENALTY * diff + AStarDistance(p, Point(tx, ty))
+   ASTAR_LOS_DIFF_PENALTY * diff + AStarLength(p - Point(tx, ty))
 }
 
 #[allow(non_snake_case)]
