@@ -31,14 +31,11 @@ pub const TURN_TIMER: i32 = 120;
 const ATTACK_DAMAGE: i32 = 40;
 const ATTACK_RANGE: i32 = 8;
 
-const ASSESS_TIME: i32 = 17;
-const ASSESS_ANGLE: f64 = TAU / 3.;
-
 const MAX_ASSESS: i32 = 32;
 const MAX_HUNGER: i32 = 1024;
 const MAX_THIRST: i32 = 256;
 
-const ASSESS_STDEV: f64 = TAU / 18.;
+const ASSESS_ANGLE: f64 = TAU / 18.;
 const ASSESS_STEPS: i32 = 4;
 const ASSESS_TURNS: i32 = 16;
 
@@ -51,7 +48,6 @@ const FOV_RADIUS_NPC: i32 = 12;
 const FOV_RADIUS_PC_: i32 = 21;
 
 const SUMMON_RANGE: i32 = 12;
-const WANDER_STEPS: i32 = 16;
 const WANDER_TURNS: f64 = 2.;
 const WORLD_SIZE: i32 = 100;
 
@@ -293,6 +289,18 @@ impl Board {
         let vision = if player { &mut self._pc_vision } else { &mut self.npc_vision };
         vision.compute(&VisionArgs { player, pos, dir }, |p| self.base.get_tile_at(p));
         known.update(&entity, &self.base, vision);
+
+        std::mem::swap(&mut self.base.entities[eid].known, &mut known);
+        self.known = Some(known);
+    }
+
+    fn update_known_entity(&mut self, eid: EID, oid: EID) {
+        let mut known = self.known.take().unwrap_or_default();
+        std::mem::swap(&mut self.base.entities[eid].known, &mut known);
+
+        let me = &self.base.entities[eid];
+        let other = &self.base.entities[oid];
+        known.update_entity(me, &self.base, other, false);
 
         std::mem::swap(&mut self.base.entities[eid].known, &mut known);
         self.known = Some(known);
@@ -867,7 +875,7 @@ fn assess_direction(dir: Point, ai: &mut AIState, rng: &mut RNG) {
     for _ in 0..ASSESS_STEPS {
         let scale = 1000;
         let steps = rng.gen::<i32>().rem_euclid(ASSESS_TURNS);
-        let angle = Normal::new(0., ASSESS_STDEV).unwrap().sample(rng);
+        let angle = Normal::new(0., ASSESS_ANGLE).unwrap().sample(rng);
         let (sin, cos) = (angle.sin(), angle.cos());
         let rx = (cos * (scale * dx) as f64) + (sin * (scale * dy) as f64);
         let ry = (cos * (scale * dy) as f64) - (sin * (scale * dx) as f64);
@@ -878,32 +886,11 @@ fn assess_direction(dir: Point, ai: &mut AIState, rng: &mut RNG) {
     }
 }
 
-fn assess_threats(source: Point, ai: &mut AIState) {
+fn assess_threats(source: Point, ai: &mut AIState, rng: &mut RNG) {
     if !ai.flight.fleeing { return; }
     if ai.flight.threats.is_empty() { return; }
 
-    let target = ai.flight.threats[0];
-    let Point(dx, dy) = target - source;
-
-    for i in 0..ASSESS_TIME {
-        let a = 1 * ASSESS_TIME / 4;
-        let b = 2 * ASSESS_TIME / 4;
-        let c = 3 * ASSESS_TIME / 4;
-        let depth = if i < a {
-            -i
-        } else if i < c {
-            i - 2 * a
-        } else {
-            -i + 2 * c - 2 * a
-        };
-        let scale = 1000;
-        let angle = ASSESS_ANGLE * depth as f64 / b as f64;
-        let (sin, cos) = (angle.sin(), angle.cos());
-        let rx = (cos * (scale * dx) as f64) + (sin * (scale * dy) as f64);
-        let ry = (cos * (scale * dy) as f64) - (sin * (scale * dx) as f64);
-        let target = Point(rx as i32, ry as i32);
-        ai.plan.push(Step { kind: StepKind::Look, target });
-    }
+    assess_direction(ai.flight.threats[0] - source, ai, rng);
     ai.plan.push(Step { kind: StepKind::Calm, target: source });
 }
 
@@ -1223,7 +1210,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
             Goal::Drink => ai.plan.push(Step { kind: StepKind::Drink, target }),
             Goal::Eat => ai.plan.push(Step { kind: StepKind::Eat, target }),
             Goal::Explore => {}
-            Goal::Flee => assess_threats(target, ai),
+            Goal::Flee => assess_threats(target, ai, rng),
         }
         ai.plan.reverse();
         if let Some(x) = plan_from_cached(pokemon, &hints, ai, rng) { return x; }
@@ -1562,9 +1549,7 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
             let oid = state.board.get_entity_at(target);
             let cb = move |board: &mut Board, rng: &mut RNG| {
                 let oid = if let Some(x) = oid { x } else { return; };
-                let other = &mut board.entities[oid];
-                other.dir = source - target;
-                let removed = match other {
+                let remove = match &mut board.entities[oid] {
                     Entity::Pokemon(x) => {
                         let damage = 0 * rng.gen::<i32>().rem_euclid(ATTACK_DAMAGE);
                         x.data.me.cur_hp = max(0, x.data.me.cur_hp - damage);
@@ -1576,7 +1561,8 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                     }
                 };
                 let cb = move |board: &mut Board, _: &mut RNG| {
-                    if removed { board.remove_entity(oid); };
+                    if remove { return board.remove_entity(oid); }
+                    board.update_known_entity(oid, eid);
                 };
                 board.add_effect(apply_damage(board, target, Box::new(cb)), rng);
             };
