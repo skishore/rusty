@@ -286,7 +286,7 @@ impl Knowledge {
     // Writes
 
     pub fn update(&mut self, me: &Entity, view: &BoardView, vision: &Vision) {
-        self.age_out(me.player);
+        self.age_out();
         let time = self.time;
 
         // Entities have approximate knowledge about friends, even if unseen.
@@ -326,10 +326,8 @@ impl Knowledge {
         self.forget(me.player);
     }
 
-    // Private helpers
-
-    fn update_entity(&mut self, me: &Entity, view: &BoardView,
-                     other: &Entity, seen: bool) -> EntityHandle {
+    pub fn update_entity(&mut self, me: &Entity, view: &BoardView,
+                         other: &Entity, seen: bool) -> EntityHandle {
         let handle = *self.entity_by_eid.entry(other.id()).and_modify(|x| {
             self.entities.move_to_front(*x);
             let existing = &mut self.entities[*x];
@@ -363,7 +361,7 @@ impl Knowledge {
         entry.dir = other.dir;
         entry.moved = !seen;
         entry.glyph = other.glyph;
-        entry.rival = !trainer.is_some() && species != me.species() && false;
+        entry.rival = !trainer.is_some() && species != me.species();
         entry.friend = trainer.is_some() && trainer == me.trainer();
         entry.player = other.player;
         entry.view = get_view(other, view);
@@ -371,7 +369,9 @@ impl Knowledge {
         handle
     }
 
-    fn age_out(&mut self, _player: bool) {
+    // Private helpers
+
+    fn age_out(&mut self) {
         for x in &mut self.entities { x.age += 1; }
         self.time.0 += 1;
     }
