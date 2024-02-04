@@ -262,6 +262,10 @@ impl<'a> CellResult<'a> {
         self.cell.map(|x| !x.tile.blocked()).unwrap_or(false)
     }
 
+    pub fn unknown(&self) -> bool {
+        self.cell.is_none()
+    }
+
     pub fn visible(&self) -> bool {
         self.cell.map(|x| self.root.time == x.time).unwrap_or(false)
     }

@@ -18,7 +18,7 @@ use crate::entity::{PokemonArgs, SummonArgs, TrainerArgs};
 use crate::entity::{PokemonEdge, PokemonIndividualData, PokemonSpeciesData};
 use crate::knowledge::{Knowledge, Timestamp, Vision, VisionArgs, get_pp, get_hp};
 use crate::knowledge::{EntityKnowledge, EntityView, PokemonView};
-use crate::pathing::{AStar, AStarDistance, BFS, BFSResult, Status};
+use crate::pathing::{AStar, AStarLength, BFS, BFSResult, Status};
 use crate::pathing::{Dijkstra, DijkstraMap, DijkstraSearch};
 
 //////////////////////////////////////////////////////////////////////////////
@@ -749,9 +749,8 @@ pub struct FightState {
 
 #[derive(Debug, Default)]
 pub struct FlightState {
-    distances: HashMap<Point, i32>,
-    threats: Vec<Point>,
     fleeing: bool,
+    threats: Vec<Point>,
 }
 
 #[derive(Debug)]
@@ -823,7 +822,7 @@ fn explore(entity: &Entity) -> Option<BFSResult> {
         known.get(p).status().unwrap_or(Status::Free)
     };
     let done1 = |p: Point| {
-        if known.get(p).tile().is_some() { return false };
+        if !known.get(p).unknown() { return false };
         dirs::ALL.iter().any(|x| known.get(p + *x).unblocked())
     };
     let done0 = |p: Point| {
@@ -869,14 +868,16 @@ fn attack_target(entity: &Entity, target: Point, rng: &mut RNG) -> Action {
     Action::Attack(target)
 }
 
-fn assess_direction(dir: Point, ai: &mut AIState, rng: &mut RNG) {
-    let Point(dx, dy) = dir;
+fn assess_dirs(dirs: &[Point], ai: &mut AIState, rng: &mut RNG) {
+    if dirs.is_empty() { return; }
 
-    for _ in 0..ASSESS_STEPS {
+    for i in 0..ASSESS_STEPS {
         let scale = 1000;
         let steps = rng.gen::<i32>().rem_euclid(ASSESS_TURNS);
         let angle = Normal::new(0., ASSESS_ANGLE).unwrap().sample(rng);
         let (sin, cos) = (angle.sin(), angle.cos());
+
+        let Point(dx, dy) = dirs[i as usize % dirs.len()];
         let rx = (cos * (scale * dx) as f64) + (sin * (scale * dy) as f64);
         let ry = (cos * (scale * dy) as f64) - (sin * (scale * dx) as f64);
         let target = Point(rx as i32, ry as i32);
@@ -890,7 +891,8 @@ fn assess_threats(source: Point, ai: &mut AIState, rng: &mut RNG) {
     if !ai.flight.fleeing { return; }
     if ai.flight.threats.is_empty() { return; }
 
-    assess_direction(ai.flight.threats[0] - source, ai, rng);
+    let dirs: Vec<_> = ai.flight.threats.iter().map(|x| *x - source).collect();
+    assess_dirs(&dirs, ai, rng);
     ai.plan.push(Step { kind: StepKind::Calm, target: source });
 }
 
@@ -899,36 +901,54 @@ fn flee_from_threats(entity: &Entity, ai: &mut AIState) -> Option<BFSResult> {
     if ai.flight.threats.is_empty() { return None; }
 
     let (known, pos) = (&*entity.known, entity.pos);
+    let scale = AStarLength(Point(1, 0)) as f64;
     let check = |p: Point| {
         if p == pos { return Status::Free; }
-        if known.get(p).unblocked() { Status::Free } else { Status::Blocked }
+        known.get(p).status().unwrap_or(Status::Blocked)
     };
 
-    let mut map = HashMap::default();
-    map.insert(pos, 0);
-    DijkstraMap(check, FLIGHT_MAP_LIMIT, &mut map);
-
-    let score = |p: Point, v: i32| {
+    let score = |p: Point, source_distance: i32| {
         let mut threat = Point::default();
         let mut threat_distance = std::i32::MAX;
         for x in &ai.flight.threats {
-            let y = (*x - p).len_nethack();
+            let y = AStarLength(*x - p);
             if y < threat_distance { (threat, threat_distance) = (*x, y); }
         }
         let blocked = {
             let los = LOS(p, threat);
-            let len = max(los.len(), 2) - 2;
-            los.iter().skip(1).take(len).any(|x| known.get(*x).blocked())
+            (1..los.len() - 1).any(|i| known.get(los[i]).blocked())
         };
-        let frontier = dirs::ALL.iter().any(|x| !known.get(*x).tile().is_some());
+        let frontier = dirs::ALL.iter().any(|x| known.get(p + *x).unknown());
 
-        let source_distance = 0.0625 * v as f64;
-        let threat_distance = threat_distance as f64;
-        1.2 * threat_distance +
-        -1.0 * source_distance +
-        if blocked { 16.0 } else { 0.0 } +
-        if frontier { 64.0 } else { 0.0 }
+        1.2 * (threat_distance as f64) +
+        -1. * (source_distance as f64) +
+        16. * scale * (blocked as i32 as f64) +
+        64. * scale * (frontier as i32 as f64)
     };
+
+    // Fast path: if we haven't seen any of the neighboring squares, then that
+    // could be a good direction in which to flee. Choose the best one.
+    let steps: Vec<_> = dirs::ALL.iter().filter_map(
+        |x| if known.get(pos + *x).unknown() { Some(*x) } else { None }).collect();
+    if !steps.is_empty() {
+        let mut best_steps = vec![];
+        let mut best_score = std::f64::MIN;
+        for step in &steps {
+            let s = score(pos + *step, AStarLength(*step));
+            if s < best_score { continue; }
+            if s > best_score { best_steps.clear(); }
+            best_steps.push(*step);
+            best_score = s;
+        }
+        assert!(!best_steps.is_empty());
+        let targets: Vec<_> = best_steps.iter().map(|x| pos + *x).collect();
+        return Some(BFSResult { dirs: best_steps, targets });
+    }
+
+    // Slow path: do a large Dijkstra search, then score each point found.
+    let mut map = HashMap::default();
+    map.insert(pos, 0);
+    DijkstraMap(check, FLIGHT_MAP_LIMIT, &mut map);
 
     let mut best_point = pos;
     let mut best_score = std::f64::MIN;
@@ -943,6 +963,7 @@ fn flee_from_threats(entity: &Entity, ai: &mut AIState) -> Option<BFSResult> {
             (best_nearby_point, best_nearby_score) = (*k, s);
         }
     }
+
     Some(BFSResult { dirs: vec![best_nearby_point - pos], targets: vec![best_point] })
 }
 
@@ -992,39 +1013,32 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
         if !targets.is_empty() {
             targets.sort_unstable_by_key(|x| x.age);
             let EntityKnowledge { age, pos: target, .. } = *targets[0];
-            let restart = age < last_turn_age;
+            let reset = age < last_turn_age;
             if age < limit {
                 let delta = target - pos;
-                let (bias, search_turns) = if !restart && let Some(x) = fight {
+                let (bias, search_turns) = if !reset && let Some(x) = fight {
                     (x.bias, x.search_turns + 1)
                 } else {
                     (delta, 0)
                 };
                 ai.fight = Some(FightState { age, bias, search_turns, target });
             }
-            if restart { ai.plan.clear(); }
+            if reset { ai.plan.clear(); }
         }
         return;
     }
 
     // We're prey, and we should treat rivals as threats.
     let limit = ai.age_at_turn(MAX_FLIGHT_TURNS);
+    let reset = known.entities.iter().any(
+        |x| x.age < last_turn_age && x.rival);
     let mut threats: Vec<_> = known.entities.iter().filter_map(
         |x| if x.age < limit && x.rival { Some(x.pos) } else { None }).collect();
     threats.sort_unstable_by_key(|x| (x.0, x.1));
-    if threats == ai.flight.threats { return; }
+    if !reset && threats == ai.flight.threats { return; }
 
     ai.plan.clear();
-    let fleeing = !threats.is_empty();
-    ai.flight = FlightState { distances: HashMap::default(), threats, fleeing };
-    if !fleeing { return; }
-
-    let check = |p: Point| {
-        if p == pos { return Status::Free; }
-        if known.get(p).unblocked() { Status::Free } else { Status::Blocked }
-    };
-    for x in &ai.flight.threats { ai.flight.distances.insert(*x, 0); }
-    DijkstraMap(check, FLIGHT_MAP_LIMIT, &mut ai.flight.distances);
+    ai.flight = FlightState { fleeing: !threats.is_empty(), threats };
 }
 
 fn plan_from_cached(entity: &Entity, hints: &[Hint],
@@ -1060,7 +1074,7 @@ fn plan_from_cached(entity: &Entity, hints: &[Hint],
     if let Some(x) = ai.hints.get(&ai.goal) && known.get(*x).visible() {
         let target = ai.plan.iter().find_map(
             |x| if x.kind == StepKind::Move { Some(x.target) } else { None });
-        if let Some(y) = target && AStarDistance(pos, *x) < AStarDistance(pos, y) {
+        if let Some(y) = target && AStarLength(pos - *x) < AStarLength(pos - y) {
             let los = LOS(pos, *x);
             let check = |p: Point| { known.get(p).status().unwrap_or(Status::Free) };
             let free = (1..los.len() - 1).all(|i| check(los[i]) == Status::Free);
@@ -1192,7 +1206,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
     if ai.goal == Goal::Explore {
         for _ in 0..64 {
             let candidate = target + *sample(&dirs::ALL, rng);
-            if known.get(candidate).tile().is_none() { target = candidate; }
+            if known.get(candidate).unknown() { target = candidate; }
         }
     }
     pokemon.data.target.set(result.targets);
@@ -1205,7 +1219,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         let kind = StepKind::Move;
         ai.plan = path.iter().map(|x| Step { kind, target: *x }).collect();
         match ai.goal {
-            Goal::Assess => assess_direction(pokemon.dir, ai, rng),
+            Goal::Assess => assess_dirs(&[pokemon.dir], ai, rng),
             Goal::Chase => {}
             Goal::Drink => ai.plan.push(Step { kind: StepKind::Drink, target }),
             Goal::Eat => ai.plan.push(Step { kind: StepKind::Eat, target }),
@@ -2507,21 +2521,12 @@ impl State {
                 let debug = {
                     let a = std::mem::take(&mut ai.plan);
                     let b = std::mem::take(&mut ai.turn_times);
-                    let c = std::mem::take(&mut ai.flight.distances);
                     let debug = format!("{:?}", ai);
-                    ai.flight.distances = c;
                     ai.turn_times = b;
                     ai.plan = a;
                     debug
                 };
 
-                if 0 == 1 {
-                    for (point, value) in &ai.flight.distances {
-                        let point = Point(2 * point.0, point.1);
-                        let ch = std::char::from_digit((10000 + *value) as u32 % 10, 10).unwrap();
-                        slice.set(point, Glyph::wdfg(ch, slice.get(point).fg()));
-                    }
-                }
                 for step in &ai.plan {
                     if frame.is_some() { continue; }
                     if step.kind == StepKind::Look { continue; }
@@ -2654,6 +2659,7 @@ mod tests {
         b.iter(|| {
             state.inputs.push(Input::Char('.'));
             state.update();
+            while state.board.get_current_frame().is_some() { state.update(); }
         });
     }
 }
