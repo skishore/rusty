@@ -219,9 +219,17 @@ impl AStarHeap {
 // A* for pathfinding to a known target
 
 const ASTAR_UNIT_COST: i32 = 16;
-const ASTAR_DIAGONAL_PENALTY: i32 = 2;
+const ASTAR_DIAGONAL_PENALTY: i32 = 6;
 const ASTAR_LOS_DIFF_PENALTY: i32 = 1;
 const ASTAR_OCCUPIED_PENALTY: i32 = 64;
+
+// Expose a distance function for use in other heuristics.
+#[allow(non_snake_case)]
+pub fn AStarDistance(a: Point, b: Point) -> i32 {
+    let ax = (a.0 - b.0).abs();
+    let ay = (a.1 - b.1).abs();
+    ASTAR_UNIT_COST * max(ax, ay) + ASTAR_DIAGONAL_PENALTY * min(ax, ay)
+}
 
 // "diff" penalizes paths that travel far from the direct line-of-sight
 // from the source to the target. In order to compute it, we figure out if
@@ -243,7 +251,7 @@ const ASTAR_OCCUPIED_PENALTY: i32 = 64;
 fn AStarHeuristic(p: Point, los: &Vec<Point>) -> i32 {
     let Point(px, py) = p;
     let Point(sx, sy) = los[0];
-    let Point(tx, ty) = los.last().unwrap();
+    let Point(tx, ty) = *los.last().unwrap();
 
     let diff = (|| {
         let dx = tx - sx;
@@ -262,11 +270,7 @@ fn AStarHeuristic(p: Point, los: &Vec<Point>) -> i32 {
         }
     })();
 
-    let x = (tx - px).abs();
-    let y = (ty - py).abs();
-    return ASTAR_UNIT_COST * max(x, y) +
-           ASTAR_DIAGONAL_PENALTY * min(x, y) +
-           ASTAR_LOS_DIFF_PENALTY * diff;
+   ASTAR_LOS_DIFF_PENALTY * diff + AStarDistance(p, Point(tx, ty))
 }
 
 #[allow(non_snake_case)]
@@ -275,12 +279,7 @@ pub fn AStar<F: Fn(Point) -> Status>(
     // Try line-of-sight - if that path is clear, then we don't need to search.
     // As with the full search below, we don't check if source is blocked here.
     let los = LOS(source, target);
-    let free = (|| {
-        for i in 1..los.len() - 1 {
-            if check(los[i]) != Status::Free { return false; }
-        }
-        return true;
-    })();
+    let free = (1..los.len() - 1).all(|i| check(los[i]) == Status::Free);
     if free { return Some(los.into_iter().skip(1).collect()) }
 
     Dijkstra(source, |x| x == target, limit, check, |x| AStarHeuristic(x, &los))
@@ -290,10 +289,15 @@ pub fn AStar<F: Fn(Point) -> Status>(
 
 // Dijkstra
 
+// Dijkstra search for a point satisfying an arbitrary predicate.
+#[allow(non_snake_case)]
+pub fn DijkstraSearch<F: Fn(Point) -> bool, G: Fn(Point) -> Status>(
+        source: Point, target: F, limit: i32, check: G) -> Option<Vec<Point>> {
+    Dijkstra(source, target, limit, check, |_| { 0 })
+}
+
 // TODO(shaunak): This search algorithm is non-isotropic. It prefers to move
 // northwest. Fix it by sampling all nodes at `score` matching `target`.
-//
-// TODO(shaunak): Pass in an additional heuristic to bias this search.
 //
 // TODO(shaunak): If it's AStar, and we haven't found a target, return a path
 // that gets us as close as possible to the target.
