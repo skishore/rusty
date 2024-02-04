@@ -39,7 +39,7 @@ const MAX_THIRST: i32 = 256;
 
 const ASSESS_STDEV: f64 = TAU / 18.;
 const ASSESS_STEPS: i32 = 4;
-const ASSESS_TURNS: i32 = 32;
+const ASSESS_TURNS: i32 = 16;
 
 const MIN_FLIGHT_TURNS: i32 = 8;
 const MAX_FLIGHT_TURNS: i32 = 64;
@@ -51,7 +51,7 @@ const FOV_RADIUS_PC_: i32 = 21;
 
 const SUMMON_RANGE: i32 = 12;
 const WANDER_STEPS: i32 = 16;
-const WANDER_TURNS: f64 = 3.;
+const WANDER_TURNS: f64 = 2.;
 const WORLD_SIZE: i32 = 100;
 
 const ASTAR_LIMIT_ATTACK: i32 = 32;
@@ -1099,9 +1099,10 @@ fn plan_from_cached(entity: &Entity, hints: &[Hint],
                 }
                 target = next.target;
             }
+            let ready = move_ready(entity);
+            let quick = ready && (ai.goal == Goal::Flee || ai.goal == Goal::Chase);
+            let turns = WANDER_TURNS * if quick { 0.5 } else { 1. };
             let look = if target == pos { entity.dir } else { target - pos };
-            let quick = ai.goal == Goal::Flee || ai.goal == Goal::Chase;
-            let turns = WANDER_TURNS * if quick { 0.5 } else { 1.0 };
             Some(Action::Move(MoveData { dir, look, turns }))
         }
     }
@@ -1540,7 +1541,7 @@ fn act(state: &mut State, eid: EID, action: Action) -> ActionResult {
                 other.dir = source - target;
                 let removed = match other {
                     Entity::Pokemon(x) => {
-                        let damage = rng.gen::<i32>().rem_euclid(ATTACK_DAMAGE);
+                        let damage = 0 * rng.gen::<i32>().rem_euclid(ATTACK_DAMAGE);
                         x.data.me.cur_hp = max(0, x.data.me.cur_hp - damage);
                         x.data.me.cur_hp == 0
                     }

@@ -363,7 +363,7 @@ impl Knowledge {
         entry.dir = other.dir;
         entry.moved = !seen;
         entry.glyph = other.glyph;
-        entry.rival = !trainer.is_some() && species != me.species() && false;
+        entry.rival = !trainer.is_some() && species != me.species();
         entry.friend = trainer.is_some() && trainer == me.trainer();
         entry.player = other.player;
         entry.view = get_view(other, view);

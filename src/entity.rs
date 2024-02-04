@@ -18,7 +18,7 @@ use crate::knowledge::Knowledge;
 // Constants
 
 const TRAINER_HP: i32 = 8;
-const TRAINER_SPEED: f64 = 0.10;
+const TRAINER_SPEED: f64 = 0.15;
 const TYPED_ENTITY_OFFSET: isize = 8;
 
 lazy_static! {
@@ -42,7 +42,7 @@ lazy_static! {
     static ref POKEMON_SPECIES:
             HashMap<&'static str, (PokemonSpeciesData, Vec<&'static Attack>)> = {
         let items = [
-            ("Bulbasaur",  90, 0.17, Glyph::wdfg('B', 0x020), vec![]),
+            ("Bulbasaur",  90, 0.18, Glyph::wdfg('B', 0x020), vec![]),
             ("Charmander", 80, 0.20, Glyph::wdfg('C', 0x410), vec!["Ember"]),
             ("Squirtle",   70, 0.25, Glyph::wdfg('S', 0x234), vec!["Ice Beam"]),
             ("Eevee",      80, 0.20, Glyph::wdfg('E', 0x420), vec!["Headbutt"]),
