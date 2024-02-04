@@ -734,7 +734,7 @@ pub struct FightState {
     age: i32,
     bias: Point,
     target: Point,
-    searching: bool,
+    search_turns: i32,
 }
 
 #[derive(Debug, Default)]
@@ -1000,9 +1000,15 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
             targets.sort_unstable_by_key(|x| x.age);
             let EntityKnowledge { age, pos: target, .. } = *targets[0];
             let restart = age < last_turn_age;
-            let (mut bias, mut searching) = (target - pos, false);
-            if !restart && let Some(x) = fight { (bias, searching) = (x.bias, x.searching) };
-            if age < limit { ai.fight = Some(FightState { age, bias, searching, target }); }
+            if age < limit {
+                let delta = target - pos;
+                let (bias, search_turns) = if !restart && let Some(x) = fight {
+                    (x.bias, x.search_turns + 1)
+                } else {
+                    (delta, 0)
+                };
+                ai.fight = Some(FightState { age, bias, search_turns, target });
+            }
             if restart { ai.plan.clear(); }
         }
         return;
@@ -1134,12 +1140,13 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
             (dirs, targets) = (x.dirs, x.targets);
             ai.goal = Goal::Flee;
         } else if let Some(x) = &mut ai.fight {
-            let source = if x.searching { pokemon.pos } else { x.target };
+            let search_nearby = x.search_turns > x.bias.len_l1();
+            let source = if search_nearby { pokemon.pos } else { x.target };
             if x.age == 0 {
-                (ai.goal, x.searching) = (Goal::Chase, false);
+                ai.goal = Goal::Chase;
                 return attack_target(pokemon, x.target, rng);
             } else if let Some(y) = search_around(pokemon, source, x.age, x.bias) {
-                (ai.goal, x.searching) = (Goal::Chase, true);
+                ai.goal = Goal::Chase;
                 (dirs, targets) = (y.dirs, y.targets);
             }
         }
