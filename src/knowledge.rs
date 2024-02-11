@@ -30,7 +30,7 @@ pub struct Timestamp(u32);
 impl std::ops::Sub for Timestamp {
     type Output = i32;
     fn sub(self, other: Timestamp) -> Self::Output {
-        (self.0 - other.0) as Self::Output
+        self.0.wrapping_sub(other.0) as Self::Output
     }
 }
 
