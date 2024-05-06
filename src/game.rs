@@ -760,7 +760,6 @@ pub struct AIState {
     hints: HashMap<Goal, Point>,
     fight: Option<FightState>,
     flight: Option<FlightState>,
-    assess: Option<Vec<Point>>,
     till_assess: i32,
     till_hunger: i32,
     till_thirst: i32,
@@ -776,7 +775,6 @@ impl AIState {
             hints: HashMap::default(),
             fight: None,
             flight: None,
-            assess: None,
             till_assess: rng.gen::<i32>().rem_euclid(MAX_ASSESS),
             till_hunger: rng.gen::<i32>().rem_euclid(MAX_HUNGER),
             till_thirst: rng.gen::<i32>().rem_euclid(MAX_THIRST),
@@ -1042,7 +1040,6 @@ fn update_ai_state(entity: &Entity, hints: &[Hint], ai: &mut AIState) {
 
     if let Some(x) = &mut ai.flight {
         if threats.is_empty() || x.turns_since_seen >= MAX_FLIGHT_TURNS {
-            ai.assess = Some(std::mem::take(&mut x.threats));
             ai.flight = None;
         } else {
             if x.threats != threats { ai.plan.clear(); }
