@@ -1,2 +1,4 @@
 /target
 *.swp
+flamegraph.svg
+out.stacks

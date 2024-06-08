@@ -1,0 +1,15 @@
+AIState {
+  goal: Chase,
+  plan: [],
+  time: Timestamp(4290),
+  hints: {Drink: Point(47, 0), Eat: Point(85, 44)},
+  fight: Some(FightState { age: 8, bias: Point(12, -1),
+  target: Point(60, 2), search_turns: 8 }),
+  flight: None,
+  till_assess: 0,
+  till_hunger: 0,
+  till_thirst: 0,
+  turn_times: []
+  ...
+
+New plan: failed target: Point(60, 1); fallback: Move(MoveData { dir: Point(0, -1), look: Point(0, -1), turns: 2.0 })

@@ -496,7 +496,7 @@ fn mapgen(board: &mut Board, rng: &mut RNG) {
         }
         None
     };
-    for _ in 0..5 { if let Some(pos) = pos(board, rng) { board.set_tile_at(pos, fl); } }
+    for _ in 0..5 { if let Some(p) = pos(board, rng) { board.set_tile_at(p, fl); } }
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -620,12 +620,15 @@ fn select_valid_target(state: &mut State) -> Option<EID> {
 
 // Game logic
 
+#[derive(Debug)]
 pub enum Command {
     Return,
 }
 
+#[derive(Debug)]
 pub struct MoveData { dir: Point, look: Point, turns: f64 }
 
+#[derive(Debug)]
 pub enum Action {
     Attack(Point),
     Idle,
@@ -694,38 +697,6 @@ fn rivals<'a>(trainer: &'a Trainer) -> Vec<(&'a EntityKnowledge, &'a PokemonView
 }
 
 //////////////////////////////////////////////////////////////////////////////
-
-// AI state definitions:
-
-//#[derive(Debug)]
-//pub struct Pause {
-//    time: i32,
-//}
-//
-//#[derive(Debug)]
-//pub struct Fight {
-//    age: i32,
-//    target: Point,
-//}
-//
-//#[derive(Debug)]
-//pub struct Flight {
-//    age: i32,
-//    switch: i32,
-//    target: Vec<Point>,
-//}
-//
-//#[derive(Debug)]
-//pub struct Wander {
-//    time: i32,
-//}
-//
-//#[derive(Debug)]
-//pub struct Assess {
-//    switch: i32,
-//    target: Point,
-//    time: i32,
-//}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum Goal { Assess, Chase, Drink, Eat, Explore, Flee }
@@ -839,7 +810,8 @@ fn search_around(entity: &Entity, source: Point, age: i32, bias: Point) -> Optio
         known.get(p).status().unwrap_or(Status::Free)
     };
     let done1 = |p: Point| {
-        if known.get(p).age() < age { return false };
+        let cell = known.get(p);
+        if cell.age() < age || cell.blocked() { return false; }
         dirs::ALL.iter().any(|x| known.get(p + *x).unblocked())
     };
     let done0 = |p: Point| {
@@ -1059,8 +1031,10 @@ fn plan_from_cached(entity: &Entity, hints: &[Hint],
     // Check whether we can execute the immediate next step in the plan.
     let (known, pos) = (&*entity.known, entity.pos);
     let next = *ai.plan.iter().last().unwrap();
+    let look = next.kind == StepKind::Look;
     let dir = next.target - pos;
-    if next.kind != StepKind::Look && dir.len_l1() > 1 { return None; }
+    if !look && dir.len_l1() > 1 { return None; }
+    if look && let Some(x) = &ai.flight && x.turns_since_seen == 0 { return None; }
 
     // Check whether the plan's goal is still a top priority for us.
     let mut goals: Vec<Goal> = vec![];
@@ -1149,12 +1123,14 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         (Goal::Eat, Tile::get('%')),
     ];
     update_ai_state(pokemon, &hints, ai);
-    if let Some(x) = plan_from_cached(pokemon, &hints, ai, rng) { return x; }
+    if let Some(x) = plan_from_cached(pokemon, &hints, ai, rng) {
+        pokemon.data.debug.set(format!("Plan from cached: {:?}", &x));
+        return x;
+    }
 
     ai.plan.clear();
     ai.goal = Goal::Explore;
     pokemon.data.target.take();
-    pokemon.data.debug.set("Recomputing plan!".into());
     let (known, pos) = (&pokemon.known, pokemon.pos);
     let mut result = BFSResult { dirs: vec![], targets: vec![] };
 
@@ -1225,6 +1201,7 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         known.get(p).status().unwrap_or(Status::Free)
     };
     if let Some(path) = AStar(pos, target, ASTAR_LIMIT_WANDER, check) {
+        pokemon.data.debug.set(format!("New plan: new target: {:?}", target));
         let kind = StepKind::Move;
         ai.plan = path.iter().map(|x| Step { kind, target: *x }).collect();
         match ai.goal {
@@ -1239,6 +1216,8 @@ fn plan_from_state(pokemon: &Pokemon, ai: &mut AIState, rng: &mut RNG) -> Action
         if let Some(x) = plan_from_cached(pokemon, &hints, ai, rng) { return x; }
         ai.plan.clear();
     }
+    pokemon.data.debug.set(format!(
+            "New plan: failed target: {:?}; fallback: {:?}", target, fallback));
     fallback
 }
 
@@ -2508,7 +2487,7 @@ impl State {
         self.ui.render_frame(buffer);
 
         let player = &self.board.entities[self.player];
-        let offset = player.pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
+        let _offset = player.pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
 
         let frame = self.board.get_current_frame();
         let slice = &mut Slice::new(buffer, self.ui.map);
