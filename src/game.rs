@@ -1857,6 +1857,7 @@ fn update_focus(state: &mut State) {
 }
 
 fn update_state(state: &mut State) {
+    state.frame = (state.frame + 1) & 0xffffff;
     if state.board.advance_effect(&mut state.rng) {
         state.board.update_known(state.player.eid());
         return;
@@ -1928,8 +1929,8 @@ const UI_ROW_SPACE: i32 = 1;
 const UI_KEY_SPACE: i32 = 4;
 
 const UI_LOG_SIZE: i32 = 4;
-const UI_MAP_SIZE_X: i32 = WORLD_SIZE;
-const UI_MAP_SIZE_Y: i32 = WORLD_SIZE;
+const UI_MAP_SIZE_X: i32 = 43;
+const UI_MAP_SIZE_Y: i32 = 43;
 const UI_CHOICE_SIZE: i32 = 40;
 const UI_STATUS_SIZE: i32 = 30;
 const UI_COLOR: i32 = 0x430;
@@ -2399,6 +2400,7 @@ struct Target {
 pub struct State {
     board: Board,
     focus: Focus,
+    frame: i32,
     input: Action,
     inputs: Vec<Input>,
     choice: Option<i32>,
@@ -2451,10 +2453,9 @@ impl State {
         }
         board.update_known(tid.eid());
 
-        let point_of_view = Some(board.entity_order[1]);
-
         Self {
             board,
+            frame: 0,
             focus: Focus {
                 active: false,
                 vision: Vision::new(FOV_RADIUS_NPC),
@@ -2464,7 +2465,7 @@ impl State {
             inputs: vec![],
             choice: None,
             target: None,
-            point_of_view,
+            point_of_view: None,
             player: tid,
             menu: None,
             rng,
@@ -2487,7 +2488,7 @@ impl State {
         self.ui.render_frame(buffer);
 
         let player = &self.board.entities[self.player];
-        let _offset = player.pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
+        let offset = player.pos - Point(UI_MAP_SIZE_X / 2, UI_MAP_SIZE_Y / 2);
 
         let frame = self.board.get_current_frame();
         let slice = &mut Slice::new(buffer, self.ui.map);
@@ -2497,7 +2498,7 @@ impl State {
         });
 
         let board = &self.board;
-        let offset = Point::default();
+        //let offset = Point::default();
         let entity = board.entity_order.iter().find_map(|x| {
             let okay = Some(board.entities[*x].id()) == self.point_of_view;
             if okay { Some(&board.entities[*x]) } else { None }
@@ -2593,13 +2594,75 @@ impl State {
             let frame = target.frame >> 1;
             let count = UI_TARGET_FRAMES >> 1;
             let limit = target.path.len() as i32 - 1;
-            let ch = ray_character(target.source, target.target);
+            let ch = ray_character(target.target - target.source);
             for i in 0..limit {
                 if !((i + count - frame) % count < 2) { continue; }
                 let (point, okay) = target.path[i as usize];
                 let color = if okay { 0x440 } else { 0x400 };
                 set(slice, point, Glyph::wdfg(ch, color));
             }
+        }
+
+        if true {
+            let floor = Tile::get('.');
+            let length = 4 as usize; // FOV_RADIUS_NPC as usize;
+            let mut arrows = vec![];
+            let mut counts = HashMap::default();
+            let mut vision = Vision::new(FOV_RADIUS_NPC);
+            let lookup = |p: Point| player.known.get(p).tile().unwrap_or(floor);
+            for other in &player.known.entities {
+                let EntityKnowledge { pos, dir, .. } = other;
+                if other.friend || other.age > 0 { continue; }
+                let args = VisionArgs { player: false, pos: *pos, dir: *dir };
+                vision.compute(&args, lookup);
+                let frame = (self.frame / 4) % (FOV_RADIUS_NPC + 2);
+                for point in &vision.points_seen {
+                    let hi = ((*point - *pos).len_l2() - frame as f64).abs() < 1.0;
+                    let hi = if hi { 1 } else { 0 };
+                    counts.entry(*point).and_modify(
+                            |x| *x = max(hi, *x)).or_insert(hi);
+                }
+
+                let ch = ray_character(*dir);
+                let norm = length as f64 / dir.len_l2();
+                let diff = Point((dir.0 as f64 * norm).round() as i32,
+                                 (dir.1 as f64 * norm).round() as i32);
+                arrows.push((ch, LOS(*pos, *pos + diff)));
+                arrows.last_mut().unwrap().1.remove(0);
+
+                //let mut best = None;
+                //let mut best_score = f64::NEG_INFINITY;
+                //for d in &dirs::ALL {
+                //    let dot = d.0 * dir.0 + d.1 * dir.1;
+                //    let score = (dot as f64) / (d.len_l2() * dir.len_l2());
+                //    if score > best_score { (best, best_score) = (Some(*d), score) };
+                //}
+                //let best = best.unwrap();
+                //arrows.insert(*pos + best, ray_character(best));
+            }
+            //for (point, count) in &counts {
+            //    let color = if *count == 1 { Some(Color::dark(5)) } else { None };
+            //    recolor(slice, *point, None, color);
+            //}
+            for (ch, arrow) in &arrows {
+                //let index = (self.frame as f64 * 1.5) as usize % (16 * length);
+                //if index < 4 * length {
+                //    let color = if index < length {
+                //        Color::default()
+                //    } else {
+                //        let x = 1.0 - 0.33 * (index as f64 / length as f64);
+                //        Color::dark((15.0 * x).round() as u8)
+                //    };
+                //    for i in 0..min(index, arrow.len()) {
+                //        set(slice, arrow[i], Glyph::wdfg(*ch, color));
+                //    }
+                //}
+                let index = (self.frame as f64 * 0.5) as usize % (8 * length);
+                if index < arrow.len() {
+                    set(slice, arrow[index], Glyph::wide(*ch));
+                }
+            }
+
         }
 
         if self.focus.active {

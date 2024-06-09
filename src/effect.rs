@@ -174,8 +174,8 @@ fn random_delay(n: i32) -> i32 {
     count
 }
 
-pub fn ray_character(source: Point, target: Point) -> char {
-    let Point(x, y) = source - target;
+pub fn ray_character(delta: Point) -> char {
+    let Point(x, y) = delta;
     let (ax, ay) = (x.abs(), y.abs());
     if ax > 2 * ay { return '-'; }
     if ay > 2 * ax { return '|'; }
@@ -250,7 +250,7 @@ fn RayEffect(source: Point, target: Point, speed: i32) -> Effect {
     if line.len() <= 2 { return Effect::default(); }
 
     let mut result = Vec::new();
-    let glyph = Glyph::wdfg(ray_character(source, target), 0x400);
+    let glyph = Glyph::wdfg(ray_character(target - source), 0x400);
     let denom = ((line.len() - 2 + speed as usize) % speed as usize) as i32;
     let start = if denom == 0 { speed } else { denom } as usize;
     for i in (start..line.len() - 1).step_by(speed as usize) {
@@ -342,7 +342,7 @@ pub fn EmberEffect(_: &Board, _: &mut RNG, source: Point, target: Point) -> Effe
 pub fn IceBeamEffect(_: &Board, _: &mut RNG, source: Point, target: Point) -> Effect {
     let mut effect = Effect::default();
     let line = LOS(source, target);
-    let ray = ray_character(source, target).to_string();
+    let ray = ray_character(target - source).to_string();
 
     let trail: Sparkle = vec![
         (2, &ray, 0x555.into()),
@@ -373,7 +373,7 @@ pub fn IceBeamEffect(_: &Board, _: &mut RNG, source: Point, target: Point) -> Ef
 #[allow(non_snake_case)]
 pub fn BlizzardEffect(_: &Board, rng: &mut RNG, source: Point, target: Point) -> Effect {
     let mut effect = Effect::default();
-    let ray = ray_character(source, target).to_string();
+    let ray = ray_character(target - source).to_string();
 
     let mut points = vec![target];
     let mut used = HashSet::default();
